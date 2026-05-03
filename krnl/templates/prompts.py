@@ -20,28 +20,30 @@ Rules:
 the reference implementation, test inputs, or imports unless absolutely necessary.
 5. Preserve the function signatures of the @cute.jit launcher and test inputs generator.
 6. Be specific about what you changed and why.
+7. Study the dead ends carefully — do not re-apply strategies that have already failed or regressed.
+8. Use the remaining headroom analysis to target the right bottleneck.
 """
 
 VARIATION_USER_PROMPT = """\
-## Current Kernel (Variation {parent_id})
+## Parent Kernel: Variation {parent_id} (Bottleneck: {parent_bottleneck})
 
 ```python
 {kernel_source}
 ```
 
-## Launcher (@cute.jit host function)
+## Parent Launcher (@cute.jit)
 
 ```python
 {launcher_source}
 ```
 
-## Full File (for context)
+## Full Parent File (for context)
 
 ```python
 {full_source}
 ```
 
-## NCU Profiling Metrics
+## NCU Profiling Metrics (Parent v{parent_id})
 
 {ncu_summary}
 
@@ -49,27 +51,39 @@ VARIATION_USER_PROMPT = """\
 
 {bottleneck_summary}
 
+## Remaining Performance Headroom
+
+{headroom}
+
 ## Relevant Optimization Principles
 
 {principles_text}
 
-## Optimization History
+## What Has Been Tried and Why It Didn't Help
+
+{dead_ends}
+
+## Full Optimization History
 
 {history}
 
 ## Instructions
 
-Generate an optimized variation of this cuteDSL kernel. Apply one or more of the \
-provided principles to address the identified bottlenecks.
+Generate an optimized variation of this cuteDSL kernel. You are deriving from \
+v{parent_id} (bottleneck: {parent_bottleneck}). Apply one or more of the provided \
+principles to address the identified bottleneck. Study the dead ends and history \
+before deciding — every new variation must be a function of what was tried, how it \
+performed, and where the remaining headroom is.
 
 You must respond with:
 
 1. **Principles Applied**: List which principles you are applying and why they \
 are relevant to the current bottleneck.
 
-2. **Predicted Effect**: What performance improvement do you expect and why.
+2. **Predicted Effect**: What performance improvement do you expect and why \
+(be specific about which NCU metric should improve and by how much).
 
-3. **Changes Made**: A brief description of what you changed.
+3. **Changes Made**: A brief description of what you changed relative to v{parent_id}.
 
 4. **Complete Kernel Code**: The full optimized @cute.kernel function(s) (device-side). \
 Include the complete function, not just the diff.

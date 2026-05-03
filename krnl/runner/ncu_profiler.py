@@ -23,7 +23,6 @@ class NCUMetrics:
     raw_metrics: dict[str, str] = field(default_factory=dict)
 
     def summary(self) -> str:
-        """Human-readable summary of key metrics."""
         lines = [
             f"Kernel: {self.kernel_name}",
             f"  Duration:            {self.duration_ns:.0f} ns",
@@ -35,7 +34,6 @@ class NCUMetrics:
         return "\n".join(lines)
 
     def bottleneck_summary(self) -> str:
-        """Identify the primary bottleneck for LLM consumption."""
         issues = []
         if self.compute_throughput_pct < 30:
             issues.append(
@@ -78,17 +76,15 @@ def profile_kernel(
     launcher_fn_name: str,
     test_inputs_fn_name: str,
     metrics: list[str] | None = None,
+    log_dir: Path | None = None,
 ) -> list[NCUMetrics]:
     """Run NCU on a kernel script and return parsed metrics.
 
-    We create a small wrapper script that imports the user's module,
-    generates test inputs, and calls the launcher — so NCU profiles
-    only the kernel execution.
+    If log_dir is provided, saves ncu_raw.csv and ncu_summary.md there.
     """
     if metrics is None:
         metrics = list(DEFAULT_NCU_METRICS)
 
-    # Create a wrapper script for NCU to run
     wrapper = _create_ncu_wrapper(script_path, launcher_fn_name, test_inputs_fn_name)
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
@@ -96,16 +92,22 @@ def profile_kernel(
         wrapper_path = Path(f.name)
 
     try:
-        result = _run_ncu(wrapper_path, metrics)
-        return result
+        parsed, raw_csv = _run_ncu(wrapper_path, metrics)
     finally:
         wrapper_path.unlink(missing_ok=True)
+
+    if log_dir is not None and raw_csv:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "ncu_raw.csv").write_text(raw_csv)
+        summary_lines = [m.summary() for m in parsed]
+        (log_dir / "ncu_summary.md").write_text("\n\n".join(summary_lines))
+
+    return parsed
 
 
 def _create_ncu_wrapper(
     script_path: Path, launcher_fn_name: str, test_inputs_fn_name: str
 ) -> str:
-    """Create a minimal wrapper script for NCU profiling."""
     return f"""
 import sys
 sys.path.insert(0, "{script_path.parent}")
@@ -125,8 +127,8 @@ else:
 """
 
 
-def _run_ncu(script_path: Path, metrics: list[str]) -> list[NCUMetrics]:
-    """Execute NCU and parse CSV output."""
+def _run_ncu(script_path: Path, metrics: list[str]) -> tuple[list[NCUMetrics], str]:
+    """Execute NCU and return (parsed metrics, raw CSV string)."""
     metrics_arg = ",".join(metrics)
 
     cmd = [
@@ -147,12 +149,11 @@ def _run_ncu(script_path: Path, metrics: list[str]) -> list[NCUMetrics]:
     if result.returncode != 0:
         raise RuntimeError(f"NCU failed:\nstdout: {result.stdout}\nstderr: {result.stderr}")
 
-    return _parse_ncu_csv(result.stdout)
+    raw_csv = result.stdout
+    return _parse_ncu_csv(raw_csv), raw_csv
 
 
 def _parse_ncu_csv(csv_output: str) -> list[NCUMetrics]:
-    """Parse NCU CSV output into structured metrics."""
-    # NCU CSV may have header lines starting with "=="
     lines = [line for line in csv_output.strip().split("\n") if not line.startswith("==")]
     if not lines:
         return []
@@ -160,7 +161,6 @@ def _parse_ncu_csv(csv_output: str) -> list[NCUMetrics]:
     csv_text = "\n".join(lines)
     reader = csv.DictReader(io.StringIO(csv_text))
 
-    # Group metrics by kernel name
     kernels: dict[str, dict[str, str]] = {}
     for row in reader:
         kernel_name = row.get("Kernel Name", "unknown")
@@ -194,7 +194,6 @@ def _parse_ncu_csv(csv_output: str) -> list[NCUMetrics]:
 
 
 def _safe_float(val: str) -> float:
-    """Safely convert a string to float."""
     try:
         return float(val.replace(",", ""))
     except (ValueError, AttributeError):

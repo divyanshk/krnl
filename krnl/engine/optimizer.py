@@ -386,6 +386,20 @@ def _build_parent_candidates(
             ),
         ))
 
+    # If frontier yielded nothing (e.g. all variations failed validation),
+    # fall back to the baseline so the loop can still make progress.
+    if not candidates:
+        entry = frontier_sources.get(0)
+        if entry:
+            candidates.append(ParentCandidate(
+                variation_id=0,
+                full_source=entry.full_source,
+                kernel_source=entry.kernel_source,
+                launcher_source=entry.launcher_source,
+                ncu_metrics=entry.ncu,
+                bottleneck=entry.ncu[0].bottleneck_summary() if entry.ncu else "Unknown",
+            ))
+
     # Pad with the first candidate repeated if frontier is smaller than batch_size
     while len(candidates) < n and candidates:
         candidates.append(candidates[0])

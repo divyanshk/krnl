@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "krnl"
+version = "0.1.0"
+description = "CLI tool to help kernel authors write efficient GPU kernels"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "anthropic>=0.40",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+krnl = "krnl.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["krnl*"]
+
+[tool.ruff]
+line-length = 100

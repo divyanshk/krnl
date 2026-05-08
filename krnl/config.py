@@ -4,14 +4,36 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-# NCU metrics we collect (basic set — user can expand later)
-DEFAULT_NCU_METRICS = [
-    "gpu__time_duration.sum",                    # kernel duration (ns)
-    "sm__throughput.avg.pct_of_peak_sustained",  # compute throughput %
-    "dram__throughput.avg.pct_of_peak_sustained", # memory throughput %
-    "launch__occupancy",                          # achieved occupancy
+# ── NCU metrics ───────────────────────────────────────────────────────────────
+# Tier 1: roofline position (always collected)
+_TIER1 = [
+    "gpu__time_duration.sum",                     # kernel wall time (ns)
+    "sm__throughput.avg.pct_of_peak_sustained",   # compute throughput %
+    "dram__throughput.avg.pct_of_peak_sustained", # HBM bandwidth %
+    "launch__occupancy",                          # achieved occupancy (0–1)
     "sm__warps_active.avg.pct_of_peak_sustained", # active warps %
 ]
+
+# Tier 2: causal diagnostics — explains WHY the kernel is at its roofline position
+_TIER2 = [
+    # Occupancy limiters
+    "launch__registers_per_thread",               # registers allocated per thread
+    "sm__maximum_warps_per_active_cycle_pct",     # theoretical max occupancy %
+
+    # Memory access quality
+    "l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio",  # coalescing: global loads  (ideal=1.0)
+    "l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_st.ratio",  # coalescing: global stores (ideal=1.0)
+    "l1tex__t_hit_rate.pct",                      # L1 cache hit rate %
+    "l2__t_hit_rate.pct",                         # L2 cache hit rate %
+
+    # Warp stall reasons (% of active warp cycles spent stalling on each cause)
+    "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct",   # memory latency (HBM/L2)
+    "smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct",  # compute pipeline latency
+    "smsp__warp_issue_stalled_barrier_per_warp_active.pct",           # __syncthreads / barriers
+    "smsp__warp_issue_stalled_not_selected_per_warp_active.pct",      # warp-scheduler pressure
+]
+
+DEFAULT_NCU_METRICS = _TIER1 + _TIER2
 
 DEFAULT_NCU_SECTIONS = [
     "SpeedOfLight_RooflineChart",
@@ -30,5 +52,5 @@ class KrnlConfig:
     ncu_metrics: list[str] = field(default_factory=lambda: list(DEFAULT_NCU_METRICS))
     atol: float = 1e-2
     rtol: float = 1e-2
-    variations_per_iteration: int = 2  # beam width: how many variations per round
+    variations_per_iteration: int = 2
     verbose: bool = False

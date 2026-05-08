@@ -24,6 +24,16 @@ def mock_profile_kernel(script_path, launcher_fn_name, test_inputs_fn_name,
     memory_pct   = min(22.0 + vid * 11.0, 91.0)
     occupancy    = round(min(0.82 + vid * 0.025, 0.97), 3)
 
+    # Tier-2 causal metrics — simulate improving coalescing and falling stalls
+    sectors_ld      = max(4.0  - vid * 0.5,  1.0)
+    l1_hit          = min(30.0 + vid * 8.0,  85.0)
+    l2_hit          = min(45.0 + vid * 6.0,  90.0)
+    stall_long      = max(55.0 - vid * 7.0,  8.0)
+    stall_short     = max(18.0 - vid * 2.0,  4.0)
+    stall_barrier   = max(12.0 - vid * 1.5,  2.0)
+    registers       = max(64.0 - vid * 3.0,  32.0)
+    theoretical_occ = min(75.0 + vid * 3.0, 100.0)
+
     m = NCUMetrics(
         kernel_name="mock_vector_add_kernel",
         duration_ns=duration_ns,
@@ -31,6 +41,16 @@ def mock_profile_kernel(script_path, launcher_fn_name, test_inputs_fn_name,
         memory_throughput_pct=memory_pct,
         occupancy=occupancy,
         active_warps_pct=occupancy * 100,
+        registers_per_thread=registers,
+        theoretical_occupancy_pct=theoretical_occ,
+        sectors_per_request_ld=sectors_ld,
+        sectors_per_request_st=max(sectors_ld - 0.5, 1.0),
+        l1_hit_rate_pct=l1_hit,
+        l2_hit_rate_pct=l2_hit,
+        stall_long_scoreboard_pct=stall_long,
+        stall_short_scoreboard_pct=stall_short,
+        stall_barrier_pct=stall_barrier,
+        stall_not_selected_pct=max(8.0 - vid * 1.0, 1.0),
     )
 
     if log_dir:

@@ -15,49 +15,136 @@ class NCUMetrics:
     """Parsed NCU profiling metrics for a kernel."""
 
     kernel_name: str
+
+    # ── Tier 1: roofline position ─────────────────────────────────────────
     duration_ns: float = 0.0
-    compute_throughput_pct: float = 0.0
-    memory_throughput_pct: float = 0.0
-    occupancy: float = 0.0
-    active_warps_pct: float = 0.0
+    compute_throughput_pct: float = 0.0   # sm__throughput.avg.pct_of_peak_sustained
+    memory_throughput_pct: float = 0.0    # dram__throughput.avg.pct_of_peak_sustained
+    occupancy: float = 0.0                # launch__occupancy (0–1)
+    active_warps_pct: float = 0.0         # sm__warps_active.avg.pct_of_peak_sustained
+
+    # ── Tier 2: causal diagnostics ────────────────────────────────────────
+
+    # Occupancy limiters
+    registers_per_thread: float = 0.0        # launch__registers_per_thread
+    theoretical_occupancy_pct: float = 0.0   # sm__maximum_warps_per_active_cycle_pct
+
+    # Memory access quality
+    sectors_per_request_ld: float = 0.0   # l1tex__average_t_sectors_per_request...ld (ideal=1.0)
+    sectors_per_request_st: float = 0.0   # l1tex__average_t_sectors_per_request...st
+    l1_hit_rate_pct: float = 0.0          # l1tex__t_hit_rate.pct
+    l2_hit_rate_pct: float = 0.0          # l2__t_hit_rate.pct
+
+    # Warp stall reasons (% of active cycles)
+    stall_long_scoreboard_pct: float = 0.0    # memory latency (HBM/L2)
+    stall_short_scoreboard_pct: float = 0.0   # compute pipeline latency
+    stall_barrier_pct: float = 0.0            # __syncthreads / barriers
+    stall_not_selected_pct: float = 0.0       # warp-scheduler pressure
+
+    # Raw dict — everything NCU returned, unparsed
     raw_metrics: dict[str, str] = field(default_factory=dict)
+
+    def as_metric_dict(self) -> dict[str, float]:
+        """Return all metrics as {ncu_metric_name: float} for principles matching."""
+        structured = {
+            "gpu__time_duration.sum": self.duration_ns,
+            "sm__throughput.avg.pct_of_peak_sustained": self.compute_throughput_pct,
+            "dram__throughput.avg.pct_of_peak_sustained": self.memory_throughput_pct,
+            "launch__occupancy": self.occupancy,
+            "sm__warps_active.avg.pct_of_peak_sustained": self.active_warps_pct,
+            "launch__registers_per_thread": self.registers_per_thread,
+            "sm__maximum_warps_per_active_cycle_pct": self.theoretical_occupancy_pct,
+            "l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio": self.sectors_per_request_ld,
+            "l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_st.ratio": self.sectors_per_request_st,
+            "l1tex__t_hit_rate.pct": self.l1_hit_rate_pct,
+            "l2__t_hit_rate.pct": self.l2_hit_rate_pct,
+            "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct": self.stall_long_scoreboard_pct,
+            "smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct": self.stall_short_scoreboard_pct,
+            "smsp__warp_issue_stalled_barrier_per_warp_active.pct": self.stall_barrier_pct,
+            "smsp__warp_issue_stalled_not_selected_per_warp_active.pct": self.stall_not_selected_pct,
+        }
+        # Merge raw_metrics so any extra collected metrics are also available
+        raw_floats = {k: _safe_float(v) for k, v in self.raw_metrics.items()}
+        return {**raw_floats, **structured}  # structured values win on conflict
 
     def summary(self) -> str:
         lines = [
             f"Kernel: {self.kernel_name}",
-            f"  Duration:            {self.duration_ns:.0f} ns",
-            f"  Compute Throughput:  {self.compute_throughput_pct:.1f}%",
-            f"  Memory Throughput:   {self.memory_throughput_pct:.1f}%",
-            f"  Occupancy:           {self.occupancy:.2f}",
-            f"  Active Warps:        {self.active_warps_pct:.1f}%",
+            f"  Duration:                {self.duration_ns:.0f} ns",
+            f"  Compute Throughput:      {self.compute_throughput_pct:.1f}%",
+            f"  Memory Throughput:       {self.memory_throughput_pct:.1f}%",
+            f"  Occupancy:               {self.occupancy:.2f}  (theoretical max: {self.theoretical_occupancy_pct:.1f}%)",
+            f"  Active Warps:            {self.active_warps_pct:.1f}%",
+            f"  Registers/thread:        {self.registers_per_thread:.0f}",
+            f"  Sectors/request (load):  {self.sectors_per_request_ld:.2f}  (ideal=1.0)",
+            f"  Sectors/request (store): {self.sectors_per_request_st:.2f}",
+            f"  L1 hit rate:             {self.l1_hit_rate_pct:.1f}%",
+            f"  L2 hit rate:             {self.l2_hit_rate_pct:.1f}%",
+            f"  Stall — mem latency:     {self.stall_long_scoreboard_pct:.1f}%",
+            f"  Stall — compute:         {self.stall_short_scoreboard_pct:.1f}%",
+            f"  Stall — barrier:         {self.stall_barrier_pct:.1f}%",
         ]
         return "\n".join(lines)
 
     def bottleneck_summary(self) -> str:
+        """Diagnose the primary bottleneck using causal metrics where available."""
         issues = []
-        if self.compute_throughput_pct < 30:
+
+        # Coalescing check (most specific — overrides generic memory diagnosis)
+        if self.sectors_per_request_ld > 2.0:
             issues.append(
-                f"LOW COMPUTE THROUGHPUT ({self.compute_throughput_pct:.1f}%) — "
-                "kernel is not utilizing compute units effectively"
-            )
-        if self.memory_throughput_pct < 30:
-            issues.append(
-                f"LOW MEMORY THROUGHPUT ({self.memory_throughput_pct:.1f}%) — "
-                "kernel is not saturating memory bandwidth"
-            )
-        if self.occupancy < 0.5:
-            issues.append(
-                f"LOW OCCUPANCY ({self.occupancy:.2f}) — "
-                "not enough warps to hide latency, check register/shared memory pressure"
-            )
-        if self.compute_throughput_pct > 70 and self.memory_throughput_pct > 70:
-            issues.append(
-                "BOTH compute and memory near peak — kernel is well-balanced, "
-                "further optimization may require algorithmic changes"
+                f"UNCOALESCED LOADS (sectors_per_request_ld={self.sectors_per_request_ld:.1f}, ideal=1.0) — "
+                "threads in a warp are accessing non-contiguous addresses"
             )
 
+        # Barrier stalls
+        if self.stall_barrier_pct > 15:
+            issues.append(
+                f"BARRIER STALLS ({self.stall_barrier_pct:.1f}% of cycles) — "
+                "too many __syncthreads() or shared memory fences"
+            )
+
+        # Memory latency stalls → occupancy too low to hide it
+        if self.stall_long_scoreboard_pct > 30:
+            if self.occupancy < 0.5:
+                issues.append(
+                    f"MEMORY LATENCY NOT HIDDEN (long_scoreboard={self.stall_long_scoreboard_pct:.1f}%, "
+                    f"occupancy={self.occupancy:.2f}) — need more active warps to overlap HBM latency"
+                )
+            else:
+                issues.append(
+                    f"MEMORY LATENCY BOUND (long_scoreboard={self.stall_long_scoreboard_pct:.1f}%) — "
+                    "kernel is blocked on HBM/L2 round-trips"
+                )
+
+        # Compute pipeline stalls
+        if self.stall_short_scoreboard_pct > 20:
+            issues.append(
+                f"COMPUTE LATENCY STALL ({self.stall_short_scoreboard_pct:.1f}%) — "
+                "instruction-level parallelism is low; try loop unrolling"
+            )
+
+        # Register pressure limiting occupancy
+        if self.registers_per_thread > 64 and self.occupancy < 0.5:
+            issues.append(
+                f"REGISTER PRESSURE (registers_per_thread={self.registers_per_thread:.0f}) — "
+                "high register count limits active warps per SM"
+            )
+
+        # Occupancy/theoretical gap (config mismatch)
+        if (self.theoretical_occupancy_pct > 0
+                and self.occupancy * 100 < self.theoretical_occupancy_pct * 0.6):
+            issues.append(
+                f"OCCUPANCY GAP (achieved={self.occupancy:.2f}, "
+                f"theoretical_max={self.theoretical_occupancy_pct:.1f}%) — "
+                "block/grid config is leaving SM capacity unused"
+            )
+
+        # Fall back to generic roofline if no causal signal
         if not issues:
-            if self.compute_throughput_pct > self.memory_throughput_pct:
+            if self.compute_throughput_pct > 70 and self.memory_throughput_pct > 70:
+                issues.append("ROOFLINE PEAK — kernel is near hardware limits; gains require algorithmic changes")
+            elif self.compute_throughput_pct > self.memory_throughput_pct:
                 issues.append(
                     f"COMPUTE BOUND (compute={self.compute_throughput_pct:.1f}%, "
                     f"memory={self.memory_throughput_pct:.1f}%)"
@@ -139,12 +226,7 @@ def _run_ncu(script_path: Path, metrics: list[str]) -> tuple[list[NCUMetrics], s
         "python", str(script_path),
     ]
 
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
     if result.returncode != 0:
         raise RuntimeError(f"NCU failed:\nstdout: {result.stdout}\nstderr: {result.stderr}")
@@ -166,7 +248,6 @@ def _parse_ncu_csv(csv_output: str) -> list[NCUMetrics]:
         kernel_name = row.get("Kernel Name", "unknown")
         metric_name = row.get("Metric Name", "")
         metric_value = row.get("Metric Value", "0")
-
         if kernel_name not in kernels:
             kernels[kernel_name] = {}
         kernels[kernel_name][metric_name] = metric_value
@@ -175,17 +256,31 @@ def _parse_ncu_csv(csv_output: str) -> list[NCUMetrics]:
     for kernel_name, raw in kernels.items():
         m = NCUMetrics(
             kernel_name=kernel_name,
+            # Tier 1
             duration_ns=_safe_float(raw.get("gpu__time_duration.sum", "0")),
-            compute_throughput_pct=_safe_float(
-                raw.get("sm__throughput.avg.pct_of_peak_sustained", "0")
-            ),
-            memory_throughput_pct=_safe_float(
-                raw.get("dram__throughput.avg.pct_of_peak_sustained", "0")
-            ),
+            compute_throughput_pct=_safe_float(raw.get("sm__throughput.avg.pct_of_peak_sustained", "0")),
+            memory_throughput_pct=_safe_float(raw.get("dram__throughput.avg.pct_of_peak_sustained", "0")),
             occupancy=_safe_float(raw.get("launch__occupancy", "0")),
-            active_warps_pct=_safe_float(
-                raw.get("sm__warps_active.avg.pct_of_peak_sustained", "0")
-            ),
+            active_warps_pct=_safe_float(raw.get("sm__warps_active.avg.pct_of_peak_sustained", "0")),
+            # Tier 2 — occupancy
+            registers_per_thread=_safe_float(raw.get("launch__registers_per_thread", "0")),
+            theoretical_occupancy_pct=_safe_float(raw.get("sm__maximum_warps_per_active_cycle_pct", "0")),
+            # Tier 2 — memory access quality
+            sectors_per_request_ld=_safe_float(raw.get(
+                "l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio", "0")),
+            sectors_per_request_st=_safe_float(raw.get(
+                "l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_st.ratio", "0")),
+            l1_hit_rate_pct=_safe_float(raw.get("l1tex__t_hit_rate.pct", "0")),
+            l2_hit_rate_pct=_safe_float(raw.get("l2__t_hit_rate.pct", "0")),
+            # Tier 2 — stall reasons
+            stall_long_scoreboard_pct=_safe_float(raw.get(
+                "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct", "0")),
+            stall_short_scoreboard_pct=_safe_float(raw.get(
+                "smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct", "0")),
+            stall_barrier_pct=_safe_float(raw.get(
+                "smsp__warp_issue_stalled_barrier_per_warp_active.pct", "0")),
+            stall_not_selected_pct=_safe_float(raw.get(
+                "smsp__warp_issue_stalled_not_selected_per_warp_active.pct", "0")),
             raw_metrics=raw,
         )
         results.append(m)
@@ -195,6 +290,6 @@ def _parse_ncu_csv(csv_output: str) -> list[NCUMetrics]:
 
 def _safe_float(val: str) -> float:
     try:
-        return float(val.replace(",", ""))
+        return float(str(val).replace(",", ""))
     except (ValueError, AttributeError):
         return 0.0

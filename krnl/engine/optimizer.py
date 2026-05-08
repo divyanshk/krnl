@@ -187,9 +187,11 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
         for p in parents:
             console.print(f"  Parent: v{p.variation_id} | Bottleneck: {p.bottleneck[:60]}")
 
-        # Find relevant principles from the best parent's bottleneck
+        # Find relevant principles using NCU metric thresholds when available
         primary_bottleneck = parents[0].bottleneck if parents else "Unknown"
-        relevant = find_relevant_principles(principles, primary_bottleneck)
+        primary_ncu_list = parents[0].ncu_metrics if parents else []
+        metric_values = primary_ncu_list[0].as_metric_dict() if primary_ncu_list else {}
+        relevant = find_relevant_principles(principles, primary_bottleneck, metric_values)
         console.print(f"  Relevant principles: {[p.title for p in relevant]}")
 
         console.print(f"  Calling Claude for {batch_size} variation(s)...")

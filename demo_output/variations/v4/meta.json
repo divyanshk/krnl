@@ -1,0 +1,17 @@
+{
+  "variation_id": 4,
+  "parent_id": 1,
+  "is_correct": true,
+  "duration_ns": 84000,
+  "speedup_vs_baseline": 1.4285714285714286,
+  "speedup_vs_pytorch": 1.4285714285714286,
+  "compute_throughput_pct": 46.0,
+  "memory_throughput_pct": 66.0,
+  "occupancy": 0.92,
+  "bottleneck": "MEMORY BOUND (memory=66.0%, compute=46.0%)",
+  "principles_cited": [
+    "vectorised slice"
+  ],
+  "predicted_effect": "A single tensor slice op reduces Python loop overhead, boosting throughput.",
+  "error": null
+}

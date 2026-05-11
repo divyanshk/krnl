@@ -1,0 +1,17 @@
+{
+  "variation_id": 3,
+  "parent_id": 2,
+  "is_correct": true,
+  "duration_ns": 93000,
+  "speedup_vs_baseline": 1.2903225806451613,
+  "speedup_vs_pytorch": 1.2903225806451613,
+  "compute_throughput_pct": 39.0,
+  "memory_throughput_pct": 55.0,
+  "occupancy": 0.895,
+  "bottleneck": "UNCOALESCED LOADS (sectors_per_request_ld=2.5, ideal=1.0) \u2014 threads in a warp are accessing non-contiguous addresses\nMEMORY LATENCY BOUND (long_scoreboard=34.0%) \u2014 kernel is blocked on HBM/L2 round-trips",
+  "principles_cited": [
+    "tiling"
+  ],
+  "predicted_effect": "Tiling the inner loop improves cache locality and should reduce memory latency.",
+  "error": null
+}

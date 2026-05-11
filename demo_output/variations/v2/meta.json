@@ -1,0 +1,17 @@
+{
+  "variation_id": 2,
+  "parent_id": 0,
+  "is_correct": true,
+  "duration_ns": 102000,
+  "speedup_vs_baseline": 1.1764705882352942,
+  "speedup_vs_pytorch": 1.1764705882352942,
+  "compute_throughput_pct": 32.0,
+  "memory_throughput_pct": 44.0,
+  "occupancy": 0.87,
+  "bottleneck": "UNCOALESCED LOADS (sectors_per_request_ld=3.0, ideal=1.0) \u2014 threads in a warp are accessing non-contiguous addresses\nMEMORY LATENCY BOUND (long_scoreboard=41.0%) \u2014 kernel is blocked on HBM/L2 round-trips",
+  "principles_cited": [
+    "vectorised slice"
+  ],
+  "predicted_effect": "A single tensor slice op reduces Python loop overhead, boosting throughput.",
+  "error": null
+}

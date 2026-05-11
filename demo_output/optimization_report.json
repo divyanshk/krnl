@@ -1,0 +1,107 @@
+{
+  "pytorch_baseline_ns": 120000,
+  "kernel_baseline_ns": 120000,
+  "best_variation_id": 0,
+  "variations": [
+    {
+      "variation_id": 0,
+      "file_path": "/Users/divyanshkhanna/Documents/Code/krnl/testing/mock_kernel.py",
+      "parent_id": -1,
+      "principles_cited": [
+        "original"
+      ],
+      "predicted_effect": "baseline",
+      "is_correct": true,
+      "duration_ns": 120000,
+      "compute_throughput_pct": 18.0,
+      "memory_throughput_pct": 22.0,
+      "occupancy": 0.82,
+      "speedup_vs_baseline": 1.0,
+      "speedup_vs_pytorch": 1.0,
+      "error": null,
+      "notes": "",
+      "diff_vs_parent": "",
+      "bottleneck": "UNCOALESCED LOADS (sectors_per_request_ld=4.0, ideal=1.0) \u2014 threads in a warp are accessing non-contiguous addresses\nMEMORY LATENCY BOUND (long_scoreboard=55.0%) \u2014 kernel is blocked on HBM/L2 round-trips"
+    },
+    {
+      "variation_id": 1,
+      "file_path": "/Users/divyanshkhanna/Documents/Code/krnl/demo_output/variations/v1/kernel.py",
+      "parent_id": 0,
+      "principles_cited": [
+        "tiling"
+      ],
+      "predicted_effect": "Tiling the inner loop improves cache locality and should reduce memory latency.",
+      "is_correct": true,
+      "duration_ns": 111000,
+      "compute_throughput_pct": 25.0,
+      "memory_throughput_pct": 33.0,
+      "occupancy": 0.845,
+      "speedup_vs_baseline": 1.0810810810810811,
+      "speedup_vs_pytorch": 1.0810810810810811,
+      "error": null,
+      "notes": "",
+      "diff_vs_parent": "--- parent_kernel+++ new_kernel@@ -1,4 +1,5 @@+@cute.kernel\n def vector_add_kernel(x, y, out, n):\n-    \"\"\"Device-side: element-wise addition.\"\"\"\n-    for i in range(n):\n-        out[i] = x[i] + y[i]+    tile = 128\n+    for base in range(0, n, tile):\n+        out[base:base + tile] = x[base:base + tile] + y[base:base + tile]",
+      "bottleneck": "UNCOALESCED LOADS (sectors_per_request_ld=3.5, ideal=1.0) \u2014 threads in a warp are accessing non-contiguous addresses\nMEMORY LATENCY BOUND (long_scoreboard=48.0%) \u2014 kernel is blocked on HBM/L2 round-trips"
+    },
+    {
+      "variation_id": 2,
+      "file_path": "/Users/divyanshkhanna/Documents/Code/krnl/demo_output/variations/v2/kernel.py",
+      "parent_id": 0,
+      "principles_cited": [
+        "vectorised slice"
+      ],
+      "predicted_effect": "A single tensor slice op reduces Python loop overhead, boosting throughput.",
+      "is_correct": true,
+      "duration_ns": 102000,
+      "compute_throughput_pct": 32.0,
+      "memory_throughput_pct": 44.0,
+      "occupancy": 0.87,
+      "speedup_vs_baseline": 1.1764705882352942,
+      "speedup_vs_pytorch": 1.1764705882352942,
+      "error": null,
+      "notes": "",
+      "diff_vs_parent": "--- parent_kernel+++ new_kernel@@ -1,4 +1,3 @@+@cute.kernel\n def vector_add_kernel(x, y, out, n):\n-    \"\"\"Device-side: element-wise addition.\"\"\"\n-    for i in range(n):\n-        out[i] = x[i] + y[i]+    out[:n] = x[:n] + y[:n]",
+      "bottleneck": "UNCOALESCED LOADS (sectors_per_request_ld=3.0, ideal=1.0) \u2014 threads in a warp are accessing non-contiguous addresses\nMEMORY LATENCY BOUND (long_scoreboard=41.0%) \u2014 kernel is blocked on HBM/L2 round-trips"
+    },
+    {
+      "variation_id": 3,
+      "file_path": "/Users/divyanshkhanna/Documents/Code/krnl/demo_output/variations/v3/kernel.py",
+      "parent_id": 2,
+      "principles_cited": [
+        "tiling"
+      ],
+      "predicted_effect": "Tiling the inner loop improves cache locality and should reduce memory latency.",
+      "is_correct": true,
+      "duration_ns": 93000,
+      "compute_throughput_pct": 39.0,
+      "memory_throughput_pct": 55.0,
+      "occupancy": 0.895,
+      "speedup_vs_baseline": 1.2903225806451613,
+      "speedup_vs_pytorch": 1.2903225806451613,
+      "error": null,
+      "notes": "",
+      "diff_vs_parent": "--- parent_kernel+++ new_kernel@@ -1,3 +1,5 @@ @cute.kernel\n def vector_add_kernel(x, y, out, n):\n-    out[:n] = x[:n] + y[:n]+    tile = 128\n+    for base in range(0, n, tile):\n+        out[base:base + tile] = x[base:base + tile] + y[base:base + tile]",
+      "bottleneck": "UNCOALESCED LOADS (sectors_per_request_ld=2.5, ideal=1.0) \u2014 threads in a warp are accessing non-contiguous addresses\nMEMORY LATENCY BOUND (long_scoreboard=34.0%) \u2014 kernel is blocked on HBM/L2 round-trips"
+    },
+    {
+      "variation_id": 4,
+      "file_path": "/Users/divyanshkhanna/Documents/Code/krnl/demo_output/variations/v4/kernel.py",
+      "parent_id": 1,
+      "principles_cited": [
+        "vectorised slice"
+      ],
+      "predicted_effect": "A single tensor slice op reduces Python loop overhead, boosting throughput.",
+      "is_correct": true,
+      "duration_ns": 84000,
+      "compute_throughput_pct": 46.0,
+      "memory_throughput_pct": 66.0,
+      "occupancy": 0.92,
+      "speedup_vs_baseline": 1.4285714285714286,
+      "speedup_vs_pytorch": 1.4285714285714286,
+      "error": null,
+      "notes": "",
+      "diff_vs_parent": "--- parent_kernel+++ new_kernel@@ -1,5 +1,3 @@ @cute.kernel\n def vector_add_kernel(x, y, out, n):\n-    tile = 128\n-    for base in range(0, n, tile):\n-        out[base:base + tile] = x[base:base + tile] + y[base:base + tile]+    out[:n] = x[:n] + y[:n]",
+      "bottleneck": "MEMORY BOUND (memory=66.0%, compute=46.0%)"
+    }
+  ]
+}

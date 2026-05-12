@@ -7,7 +7,8 @@ optimize (shared memory tiles, register blocking, vectorized loads, etc.).
 
 Structure:
   - @cute.kernel  — device-side GPU code
-  - @cute.jit     — host-side launcher
+  - @cute.jit     — host-side JIT launcher (receives Constexpr M/N/K)
+  - matmul_launch — regular Python wrapper; validates shapes and allocates output
 """
 
 import math
@@ -25,46 +26,45 @@ def matmul_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
-    M: cute.Int32,
-    N: cute.Int32,
-    K: cute.Int32,
-    a_row_stride: cute.Int32,
-    b_row_stride: cute.Int32,
-    c_row_stride: cute.Int32,
+    M: cutlass.Constexpr[int],
+    N: cutlass.Constexpr[int],
+    K: cutlass.Constexpr[int],
 ):
     """Device-side: compute C[row, col] = sum_k A[row, k] * B[k, col]."""
-    row = cute.blockIdx.y * cute.blockDim.y + cute.threadIdx.y
-    col = cute.blockIdx.x * cute.blockDim.x + cute.threadIdx.x
+    bx, by, _ = cute.arch.block_idx()
+    tx, ty, _ = cute.arch.thread_idx()
+    dimx, dimy, _ = cute.arch.block_dim()
+    row = by * dimy + ty
+    col = bx * dimx + tx
 
-    if row >= M or col >= N:
-        return
-
-    acc = 0.0
-    k = 0
-    while k < K:
-        acc += a_ptr[row * a_row_stride + k] * b_ptr[k * b_row_stride + col]
-        k += 1
-
-    c_ptr[row * c_row_stride + col] = acc
+    if row < M and col < N:
+        acc = 0.0
+        for k in cutlass.range(K):
+            acc += a_ptr[row, k] * b_ptr[k, col]
+        c_ptr[row, col] = acc
 
 
 @cute.jit
+def _launch(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    M: cutlass.Constexpr[int],
+    N: cutlass.Constexpr[int],
+    K: cutlass.Constexpr[int],
+):
+    """Host-side JIT launcher — M/N/K are constexpr so math.ceil and grid are Python values."""
+    grid = (math.ceil(N / BLOCK_N), math.ceil(M / BLOCK_M))
+    matmul_kernel(a, b, c, M, N, K).launch(grid=grid, block=(BLOCK_N, BLOCK_M))
+
+
 def matmul_launch(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Host-side: compile and launch matmul_kernel."""
+    """Public entry point: validates shapes, allocates C, then calls the JIT launcher."""
     M, K = a.shape
     K2, N = b.shape
     assert K == K2, "inner dimensions must match"
     c = torch.empty((M, N), device=a.device, dtype=a.dtype)
-    grid = (math.ceil(N / BLOCK_N), math.ceil(M / BLOCK_M))
-    cute.launch(
-        matmul_kernel,
-        grid=grid,
-        block=(BLOCK_N, BLOCK_M),
-    )(
-        a, b, c,
-        M, N, K,
-        a.stride(0), b.stride(0), c.stride(0),
-    )
+    _launch(a, b, c, M, N, K)
     return c
 
 

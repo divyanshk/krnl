@@ -2,7 +2,9 @@
 
 import csv
 import io
+import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -218,17 +220,25 @@ def _run_ncu(script_path: Path, metrics: list[str]) -> tuple[list[NCUMetrics], s
     """Execute NCU and return (parsed metrics, raw CSV string)."""
     metrics_arg = ",".join(metrics)
 
+    ncu_bin = shutil.which("ncu") or "/usr/local/cuda/bin/ncu"
     cmd = [
-        "ncu",
+        ncu_bin,
         "--csv",
         "--metrics", metrics_arg,
         "--target-processes", "all",
-        "python", str(script_path),
+        sys.executable, str(script_path),
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
     if result.returncode != 0:
+        if "ERR_NVGPUCTRPERM" in result.stdout or "ERR_NVGPUCTRPERM" in result.stderr:
+            raise RuntimeError(
+                "NCU failed: GPU performance counter access denied.\n"
+                "Fix (no reboot needed):\n"
+                "  sudo sh -c 'echo 0 > /proc/driver/nvidia/params/RestrictProfilingToAdminUsers'\n"
+                f"stdout: {result.stdout}\nstderr: {result.stderr}"
+            )
         raise RuntimeError(f"NCU failed:\nstdout: {result.stdout}\nstderr: {result.stderr}")
 
     raw_csv = result.stdout

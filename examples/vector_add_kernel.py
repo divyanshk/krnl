@@ -9,7 +9,8 @@ This file demonstrates the expected structure for krnl input files:
 
 import math
 import torch
-from cuda import cute
+import cutlass
+import cutlass.cute as cute
 
 
 @cute.kernel

@@ -10,7 +10,8 @@ Structure:
 """
 
 import torch
-from cuda import cute
+import cutlass
+import cutlass.cute as cute
 
 
 BLOCK_COLS = 256  # threads per row; tune this as an optimization parameter

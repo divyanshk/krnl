@@ -56,7 +56,8 @@ Your kernel file must define four things:
 ### Minimal example
 
 ```python
-from cuda import cute
+import cutlass
+import cutlass.cute as cute
 import torch
 
 @cute.kernel

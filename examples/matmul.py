@@ -8,7 +8,7 @@ optimize (shared memory tiles, register blocking, vectorized loads, etc.).
 Structure:
   - @cute.kernel  — device-side GPU code
   - @cute.jit     — host-side JIT launcher (receives Constexpr M/N/K)
-  - matmul_launch — regular Python wrapper; validates shapes and allocates output
+  - launch — regular Python wrapper; validates shapes and allocates output
 """
 
 import math
@@ -22,7 +22,7 @@ BLOCK_N = 16  # tile cols per block
 
 
 @cute.kernel
-def matmul_kernel(
+def kernel(
     a_ptr,
     b_ptr,
     c_ptr,
@@ -45,7 +45,7 @@ def matmul_kernel(
 
 
 @cute.jit
-def _launch(
+def host(
     a: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
@@ -55,16 +55,16 @@ def _launch(
 ):
     """Host-side JIT launcher — M/N/K are constexpr so math.ceil and grid are Python values."""
     grid = (math.ceil(N / BLOCK_N), math.ceil(M / BLOCK_M))
-    matmul_kernel(a, b, c, M, N, K).launch(grid=grid, block=(BLOCK_N, BLOCK_M))
+    kernel(a, b, c, M, N, K).launch(grid=grid, block=(BLOCK_N, BLOCK_M))
 
 
-def matmul_launch(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+def launch(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Public entry point: validates shapes, allocates C, then calls the JIT launcher."""
     M, K = a.shape
     K2, N = b.shape
     assert K == K2, "inner dimensions must match"
     c = torch.empty((M, N), device=a.device, dtype=a.dtype)
-    _launch(a, b, c, M, N, K)
+    host(a, b, c, M, N, K)
     return c
 
 

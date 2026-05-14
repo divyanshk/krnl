@@ -165,7 +165,7 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
         0: _FrontierEntry(
             full_source=kernel_info.full_source,
             kernel_source=kernel_info.kernel_source,
-            launcher_source=kernel_info.launcher_source or "",
+            launcher_source=kernel_info.jit_launcher_source or "",
             ncu=baseline_ncu,
         )
     }
@@ -231,7 +231,7 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
 
             var_source = reconstruct_kernel_file(
                 parent_kernel_info, gen.kernel_code, gen.launcher_code
-            )
+            )  # gen.launcher_code is the new @cute.jit source (or None → keep original)
             var_path = var_dir / "kernel.py"
             var_path.write_text(var_source)
             console.print(f"    Written: {var_path}")
@@ -332,11 +332,12 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
 
             console.print(f"    {record.summary_line()}")
 
-            # Add to frontier so future iterations can branch from here
+            # Add to frontier so future iterations can branch from here.
+            # launcher_source tracks the @cute.jit source for this variation.
             frontier_sources[vid] = _FrontierEntry(
                 full_source=var_source,
                 kernel_source=gen.kernel_code,
-                launcher_source=gen.launcher_code or (parent_entry.launcher_source if parent_entry else kernel_info.launcher_source or ""),
+                launcher_source=gen.launcher_code or (parent_entry.launcher_source if parent_entry else kernel_info.jit_launcher_source or ""),
                 ncu=var_ncu,
             )
 
@@ -412,7 +413,7 @@ def _build_parent_candidates(
 
 
 def _make_kernel_info_for_parent(original: KernelInfo, entry: "_FrontierEntry | None") -> KernelInfo:
-    """Return a KernelInfo-like object whose launcher_source reflects the parent."""
+    """Return a KernelInfo-like object whose jit_launcher_source reflects the parent."""
     if entry is None:
         return original
     from krnl.parsers.cutedsl_parser import KernelInfo as KI
@@ -421,8 +422,10 @@ def _make_kernel_info_for_parent(original: KernelInfo, entry: "_FrontierEntry | 
         full_source=entry.full_source,
         kernel_fn_names=original.kernel_fn_names,
         kernel_source=entry.kernel_source,
+        jit_launcher_fn_name=original.jit_launcher_fn_name,
+        jit_launcher_source=entry.launcher_source or original.jit_launcher_source,
         launcher_fn_name=original.launcher_fn_name,
-        launcher_source=entry.launcher_source or original.launcher_source,
+        launcher_source=original.launcher_source,
         ref_fn_name=original.ref_fn_name,
         ref_source=original.ref_source,
         test_inputs_fn_name=original.test_inputs_fn_name,

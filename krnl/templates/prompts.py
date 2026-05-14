@@ -16,8 +16,9 @@ Rules:
 1. The optimized kernel MUST produce the same outputs as the original for the same inputs.
 2. You MUST cite which principle(s) from the provided PRINCIPLES you are applying.
 3. You MUST predict the expected performance effect of your changes.
-4. Only modify the @cute.kernel function(s) and the @cute.jit launcher. Do NOT modify \
-the reference implementation, test inputs, or imports unless absolutely necessary.
+4. Only modify the @cute.kernel function(s) and the @cute.jit host launcher. Do NOT modify \
+the public Python launcher (launch / *_launch), the reference implementation, test inputs, \
+or imports unless absolutely necessary.
 5. Preserve the function signatures of the @cute.jit launcher and test inputs generator.
 6. Be specific about what you changed and why.
 7. Study the dead ends carefully — do not re-apply strategies that have already failed or regressed.

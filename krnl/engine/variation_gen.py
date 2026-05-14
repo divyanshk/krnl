@@ -25,7 +25,7 @@ class ParentCandidate:
     variation_id: int
     full_source: str       # complete file source for this parent
     kernel_source: str     # @cute.kernel function(s) only
-    launcher_source: str   # @cute.jit function only
+    launcher_source: str   # @cute.jit host launcher source
     ncu_metrics: list[NCUMetrics]
     bottleneck: str        # human-readable bottleneck summary
 

@@ -27,7 +27,7 @@ console = Console()
     help="Directory to write variations and reports.",
 )
 @click.option(
-    "--model", default="claude-sonnet-4-20250514", show_default=True,
+    "--model", default="claude-sonnet-4-6", show_default=True,
     help="Claude model to use for variation generation.",
 )
 @click.option(

@@ -48,7 +48,7 @@ class KrnlConfig:
     principles_file: Path = Path("PRINCIPLES.md")
     output_dir: Path = Path("krnl_output")
     num_variations: int = 5
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-sonnet-4-6"
     ncu_metrics: list[str] = field(default_factory=lambda: list(DEFAULT_NCU_METRICS))
     atol: float = 1e-2
     rtol: float = 1e-2

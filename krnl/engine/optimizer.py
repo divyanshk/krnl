@@ -121,6 +121,7 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
             kernel_info.test_inputs_fn_name,
             config.ncu_metrics,
             log_dir=baseline_dir,
+            kernel_fn_names=kernel_info.kernel_fn_names,
         )
     except Exception as e:
         console.print(f"[red]  NCU profiling failed: {e}[/]")
@@ -294,6 +295,7 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
                     kernel_info.test_inputs_fn_name,
                     config.ncu_metrics,
                     log_dir=var_dir,
+                    kernel_fn_names=kernel_info.kernel_fn_names,
                 )
             except Exception as e:
                 console.print(f"    [yellow]NCU profiling failed: {e}[/]")

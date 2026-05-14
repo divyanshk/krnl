@@ -166,8 +166,13 @@ def profile_kernel(
     test_inputs_fn_name: str,
     metrics: list[str] | None = None,
     log_dir: Path | None = None,
+    kernel_fn_names: list[str] | None = None,
 ) -> list[NCUMetrics]:
     """Run NCU on a kernel script and return parsed metrics.
+
+    kernel_fn_names: Python function names of the @cute.kernel(s) to target.
+    When provided, ncu is told to profile only kernels whose names contain any
+    of those strings — filters out torch.randn, CUB, and other setup noise.
 
     If log_dir is provided, saves ncu_raw.csv and ncu_summary.md there.
     """
@@ -181,7 +186,7 @@ def profile_kernel(
         wrapper_path = Path(f.name)
 
     try:
-        parsed, raw_csv = _run_ncu(wrapper_path, metrics)
+        parsed, raw_csv = _run_ncu(wrapper_path, metrics, kernel_fn_names)
     finally:
         wrapper_path.unlink(missing_ok=True)
 
@@ -216,7 +221,11 @@ else:
 """
 
 
-def _run_ncu(script_path: Path, metrics: list[str]) -> tuple[list[NCUMetrics], str]:
+def _run_ncu(
+    script_path: Path,
+    metrics: list[str],
+    kernel_fn_names: list[str] | None = None,
+) -> tuple[list[NCUMetrics], str]:
     """Execute NCU and return (parsed metrics, raw CSV string)."""
     metrics_arg = ",".join(metrics)
 
@@ -226,8 +235,16 @@ def _run_ncu(script_path: Path, metrics: list[str]) -> tuple[list[NCUMetrics], s
         "--csv",
         "--metrics", metrics_arg,
         "--target-processes", "all",
-        sys.executable, str(script_path),
     ]
+
+    if kernel_fn_names:
+        # CUTLASS names the compiled kernel after the Python function, so the
+        # function name appears as a substring of the mangled symbol. Profile
+        # only those kernels to exclude torch.randn, CUB, and other noise.
+        pattern = "|".join(kernel_fn_names)
+        cmd += ["--kernel-name", f"regex:.*({pattern}).*"]
+
+    cmd += [sys.executable, str(script_path)]
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 

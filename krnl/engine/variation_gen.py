@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 import anthropic
 
@@ -16,6 +17,18 @@ from krnl.templates.prompts import (
     VARIATION_PARSE_REGEX_KERNEL,
     VARIATION_PARSE_REGEX_LAUNCHER,
 )
+
+_CUTE_API_REF = (Path(__file__).parent.parent / "templates" / "cute_api_ref.md").read_text()
+
+def _build_system_prompt() -> list[dict]:
+    """Build system prompt blocks with prompt caching on the stable cheat-sheet."""
+    return [
+        {
+            "type": "text",
+            "text": SYSTEM_PROMPT + "\n\n---\n\n" + _CUTE_API_REF,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
 
 
 @dataclass
@@ -102,7 +115,7 @@ def generate_variations(
         response = client.messages.create(
             model=config.model,
             max_tokens=8192,
-            system=SYSTEM_PROMPT,
+            system=_build_system_prompt(),
             messages=[{"role": "user", "content": prompt}],
         )
 

@@ -186,7 +186,7 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
         parents = _build_parent_candidates(frontier_records, frontier_sources, batch_size)
 
         for p in parents:
-            console.print(f"  Parent: v{p.variation_id} | Bottleneck: {p.bottleneck[:60]}")
+            console.print(f"  Parent: v{p.variation_id} | Bottleneck: {p.bottleneck}")
 
         # Find relevant principles using NCU metric thresholds when available
         primary_bottleneck = parents[0].bottleneck if parents else "Unknown"

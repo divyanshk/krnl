@@ -238,11 +238,11 @@ def _run_ncu(
     ]
 
     if kernel_fn_names:
-        # CUTLASS names the compiled kernel after the Python function, so the
-        # function name appears as a substring of the mangled symbol. Profile
-        # only those kernels to exclude torch.randn, CUB, and other noise.
+        # CUTLASS mangles device kernel symbols as kernel_cutlass_<fn_name>_<params>.
+        # Anchoring on this prefix precisely excludes torch and CUB kernels
+        # (e.g. at::vectorized_elementwise_kernel, DeviceSelectSweepKernel).
         pattern = "|".join(kernel_fn_names)
-        cmd += ["--kernel-name", f"regex:.*({pattern}).*"]
+        cmd += ["--kernel-name", f"regex:kernel_cutlass_({pattern})_.*"]
 
     cmd += [sys.executable, str(script_path)]
 

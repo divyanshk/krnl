@@ -1,0 +1,15 @@
+{
+  "variation_id": 3,
+  "parent_id": 2,
+  "is_correct": true,
+  "duration_ns": 134720.0,
+  "speedup_vs_baseline": 1.2866983372921614,
+  "speedup_vs_pytorch": 0.05486935866983373,
+  "compute_throughput_pct": 0.0,
+  "memory_throughput_pct": 0.0,
+  "occupancy": 0.0,
+  "bottleneck": "UNCOALESCED LOADS (sectors_per_request_ld=4.0, ideal=1.0) \u2014 threads in a warp are accessing non-contiguous addresses\nOCCUPANCY GAP (achieved=0.00, theoretical_max=100.0%) \u2014 block/grid config is leaving SM capacity unused",
+  "principles_cited": [],
+  "predicted_effect": "",
+  "error": null
+}

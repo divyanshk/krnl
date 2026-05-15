@@ -13,7 +13,7 @@ from krnl.engine.principles import load_principles, find_relevant_principles
 from krnl.engine.tracker import OptimizationTracker, VariationRecord
 from krnl.engine.variation_gen import generate_variations, ParentCandidate
 from krnl.parsers.cutedsl_parser import parse_kernel_file, reconstruct_kernel_file, KernelInfo
-from krnl.runner.executor import run_reference, run_kernel
+from krnl.runner.executor import run_reference, run_kernel, load_test_inputs
 from krnl.runner.ncu_profiler import profile_kernel, NCUMetrics
 from krnl.runner.validator import validate_outputs
 
@@ -72,9 +72,13 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
     console.print("\n[bold]Step 1: Establishing baseline...[/]")
     tracker = OptimizationTracker()
 
+    console.print("  Loading test inputs...")
+    test_inputs = load_test_inputs(config.input_file, kernel_info.test_inputs_fn_name)
+
     console.print("  Running PyTorch reference...")
     ref_result = run_reference(
-        config.input_file, kernel_info.ref_fn_name, kernel_info.test_inputs_fn_name
+        config.input_file, kernel_info.ref_fn_name, kernel_info.test_inputs_fn_name,
+        inputs=test_inputs,
     )
     if not ref_result.success:
         console.print(f"[red]  Reference execution failed: {ref_result.error}[/]")
@@ -83,7 +87,8 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
 
     console.print("  Running original kernel...")
     kernel_result = run_kernel(
-        config.input_file, kernel_info.launcher_fn_name, kernel_info.test_inputs_fn_name
+        config.input_file, kernel_info.launcher_fn_name, kernel_info.test_inputs_fn_name,
+        inputs=test_inputs,
     )
     if not kernel_result.success:
         console.print(f"[red]  Kernel execution failed: {kernel_result.error}[/]")
@@ -230,7 +235,7 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
             parent_kernel_info = _make_kernel_info_for_parent(kernel_info, parent_entry)
 
             var_source = reconstruct_kernel_file(
-                parent_kernel_info, gen.kernel_code, gen.launcher_code
+                parent_kernel_info, gen.kernel_code, gen.launcher_code, gen.extra_imports
             )  # gen.launcher_code is the new @cute.jit source (or None → keep original)
             var_path = var_dir / "kernel.py"
             var_path.write_text(var_source)
@@ -243,7 +248,8 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
             # Run and validate
             console.print("    Running...")
             var_result = run_kernel(
-                var_path, kernel_info.launcher_fn_name, kernel_info.test_inputs_fn_name
+                var_path, kernel_info.launcher_fn_name, kernel_info.test_inputs_fn_name,
+                inputs=test_inputs,
             )
 
             if not var_result.success:

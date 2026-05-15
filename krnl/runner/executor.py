@@ -27,14 +27,30 @@ def load_module_from_file(filepath: Path, module_name: str = "krnl_user_kernel")
     return module
 
 
-def run_reference(filepath: Path, ref_fn_name: str, test_inputs_fn_name: str) -> ExecutionResult:
+def load_test_inputs(filepath: Path, test_inputs_fn_name: str) -> Any:
+    """Load test inputs once from a kernel file's get_test_inputs function.
+
+    Call this once and pass the result to run_reference and run_kernel so
+    both operate on identical tensors.
+    """
+    module = load_module_from_file(filepath, module_name="krnl_inputs_loader")
+    return getattr(module, test_inputs_fn_name)()
+
+
+def run_reference(
+    filepath: Path,
+    ref_fn_name: str,
+    test_inputs_fn_name: str,
+    inputs: Any = None,
+) -> ExecutionResult:
     """Run the PyTorch reference implementation and capture outputs."""
     try:
         module = load_module_from_file(filepath)
-        get_inputs = getattr(module, test_inputs_fn_name)
         ref_fn = getattr(module, ref_fn_name)
 
-        inputs = get_inputs()
+        if inputs is None:
+            inputs = getattr(module, test_inputs_fn_name)()
+
         if isinstance(inputs, dict):
             outputs = ref_fn(**inputs)
         elif isinstance(inputs, (list, tuple)):
@@ -49,14 +65,20 @@ def run_reference(filepath: Path, ref_fn_name: str, test_inputs_fn_name: str) ->
         return ExecutionResult(outputs=[], success=False, error=str(e))
 
 
-def run_kernel(filepath: Path, launcher_fn_name: str, test_inputs_fn_name: str) -> ExecutionResult:
+def run_kernel(
+    filepath: Path,
+    launcher_fn_name: str,
+    test_inputs_fn_name: str,
+    inputs: Any = None,
+) -> ExecutionResult:
     """Run the kernel via its launcher and capture outputs."""
     try:
         module = load_module_from_file(filepath, module_name="krnl_variant_kernel")
-        get_inputs = getattr(module, test_inputs_fn_name)
         launcher = getattr(module, launcher_fn_name)
 
-        inputs = get_inputs()
+        if inputs is None:
+            inputs = getattr(module, test_inputs_fn_name)()
+
         if isinstance(inputs, dict):
             outputs = launcher(**inputs)
         elif isinstance(inputs, (list, tuple)):

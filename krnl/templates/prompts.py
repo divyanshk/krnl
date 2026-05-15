@@ -92,8 +92,11 @@ Include the complete function, not just the diff.
 5. **Complete Launcher Code**: The full @cute.jit launcher if it needs to change, \
 or "NO CHANGE" if the launcher stays the same.
 
-Format your kernel code in a ```python block tagged with KERNEL_CODE and launcher \
-in a block tagged with LAUNCHER_CODE:
+6. **New Imports**: List any new import lines your kernel requires that are NOT already \
+in the parent file (e.g. `from cutlass.utils import SmemAllocator`). Write "NONE" if \
+no new imports are needed.
+
+Format your response with these tagged blocks:
 
 KERNEL_CODE
 ```python
@@ -108,9 +111,15 @@ LAUNCHER_CODE
 def kernel_launch(...):
     ...
 ```
+
+NEW_IMPORTS
+```python
+from cutlass.utils import SmemAllocator
+```
 """
 
 VARIATION_PARSE_REGEX_KERNEL = r"KERNEL_CODE\s*```python\s*\n(.*?)```"
 VARIATION_PARSE_REGEX_LAUNCHER = r"LAUNCHER_CODE\s*```python\s*\n(.*?)```"
+VARIATION_PARSE_REGEX_IMPORTS = r"NEW_IMPORTS\s*```python\s*\n(.*?)```"
 VARIATION_PARSE_REGEX_PRINCIPLES = r"\*\*Principles Applied\*\*:?\s*(.*?)(?:\n\n|\*\*)"
 VARIATION_PARSE_REGEX_PREDICTED = r"\*\*Predicted Effect\*\*:?\s*(.*?)(?:\n\n|\*\*)"

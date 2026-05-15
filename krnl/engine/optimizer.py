@@ -365,8 +365,7 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
         console.print(
             f"\n[bold green]Best kernel: v{best.variation_id}[/] "
             f"({best.duration_ns:.0f} ns, "
-            f"{best.speedup_vs_pytorch:.2f}x vs PyTorch, "
-            f"{best.speedup_vs_baseline:.2f}x vs original kernel)"
+            f"{best.speedup_vs_baseline:.2f}x vs baseline)"
         )
         console.print(f"  File: {best.file_path}")
     else:

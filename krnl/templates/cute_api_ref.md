@@ -231,8 +231,12 @@ cute.gemm(tiled_mma, acc, reg_A, reg_B)  # acc += reg_A @ reg_B
 tidx, tidy, tidz = cute.arch.thread_idx()   # threadIdx.x/y/z
 bidx, bidy, bidz = cute.arch.block_idx()    # blockIdx.x/y/z
 bdimx, bdimy, bdimz = cute.arch.block_dim() # blockDim.x/y/z
-cute.arch.syncthreads()                     # __syncthreads()
+cute.arch.sync_threads()                    # __syncthreads() — NOTE the underscore
+cute.arch.sync_warp()                       # __syncwarp()
 ```
+
+### DO NOT USE:
+- `cute.arch.syncthreads()` — wrong name; use `cute.arch.sync_threads()` (underscore)
 
 ---
 
@@ -275,6 +279,31 @@ bar.wait()
 ```
 
 ---
+
+## Module-Level Constants (tuning parameters)
+
+Any integer constant your kernel uses (tile sizes, unroll factors, etc.) MUST be
+defined at module level — not computed or assigned inside `@cute.kernel` or `@cute.jit`.
+The CuTe JIT captures module globals as compile-time `Constexpr` values.
+
+```python
+# CORRECT — define at module level
+BLOCK_M = 32
+BLOCK_N = 32
+BLOCK_K = 16   # <-- must exist here if used anywhere in the kernel
+
+@cute.kernel
+def kernel(...):
+    smem_a = smem_alloc.allocate_tensor(
+        cutlass.Float32,
+        cute.make_layout((BLOCK_M, BLOCK_K), stride=(BLOCK_K, 1)),
+        16,
+    )
+```
+
+### DO NOT USE:
+- Defining a constant only inside `@cute.kernel` or `@cute.jit` then using it in layouts — it won't be in scope
+- `from ... import ...` inside a `@cute.kernel` body — imports must be at file top level
 
 ## Common Import Pattern
 

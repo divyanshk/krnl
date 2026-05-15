@@ -175,8 +175,7 @@ class OptimizationTracker:
             lines.append(
                 f"**Current best: v{best.variation_id}** "
                 f"({best.duration_ns:.0f} ns, "
-                f"{best.speedup_vs_pytorch:.2f}x vs PyTorch, "
-                f"{best.speedup_vs_baseline:.2f}x vs original)"
+                f"{best.speedup_vs_baseline:.2f}x vs baseline)"
             )
 
         return "\n".join(lines)
@@ -356,7 +355,7 @@ class OptimizationTracker:
 
         lines = [
             "┌──────────┬──────────────┬────────────────┬─────────────┬──────────────┐",
-            "│ Rank     │ Variation    │ Duration (ns)  │ vs PyTorch  │ Principles   │",
+            "│ Rank     │ Variation    │ Duration (ns)  │ vs baseline │ Principles   │",
             "├──────────┼──────────────┼────────────────┼─────────────┼──────────────┤",
         ]
         for i, v in enumerate(correct):
@@ -365,7 +364,7 @@ class OptimizationTracker:
                 principles += "..."
             lines.append(
                 f"│ {i + 1:<8} │ v{v.variation_id:<11} │ {v.duration_ns:<14.0f} │ "
-                f"{v.speedup_vs_pytorch:<11.2f}x │ {principles:<12} │"
+                f"{v.speedup_vs_baseline:<11.2f}x │ {principles:<12} │"
             )
         lines.append(
             "└──────────┴──────────────┴────────────────┴─────────────┴──────────────┘"

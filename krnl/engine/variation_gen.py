@@ -17,6 +17,7 @@ from krnl.templates.prompts import (
     VARIATION_PARSE_REGEX_KERNEL,
     VARIATION_PARSE_REGEX_LAUNCHER,
     VARIATION_PARSE_REGEX_IMPORTS,
+    VARIATION_PARSE_REGEX_CONSTANTS,
 )
 
 _CUTE_API_REF = (Path(__file__).parent.parent / "templates" / "cute_api_ref.md").read_text()
@@ -50,7 +51,8 @@ class GeneratedVariation:
 
     kernel_code: str
     launcher_code: str | None  # None means no change to launcher
-    extra_imports: list[str]   # new import lines to inject into the file
+    extra_imports: list[str]    # new import lines to inject into the file
+    extra_constants: list[str]  # new module-level constant assignments to inject
     principles_cited: list[str]
     predicted_effect: str
     raw_response: str
@@ -150,6 +152,13 @@ def _parse_variation_response(response_text: str, parent_id: int) -> GeneratedVa
         if raw_imports.upper() != "NONE":
             extra_imports = [ln for ln in raw_imports.splitlines() if ln.strip()]
 
+    extra_constants: list[str] = []
+    constants_match = re.search(VARIATION_PARSE_REGEX_CONSTANTS, response_text, re.DOTALL)
+    if constants_match:
+        raw_constants = constants_match.group(1).strip()
+        if raw_constants.upper() != "NONE":
+            extra_constants = [ln for ln in raw_constants.splitlines() if ln.strip()]
+
     principles_section = re.search(
         r"\*\*Principles Applied\*\*:?\s*(.*?)(?=\*\*Predicted Effect\*\*|\*\*Changes Made\*\*)",
         response_text,
@@ -175,6 +184,7 @@ def _parse_variation_response(response_text: str, parent_id: int) -> GeneratedVa
         kernel_code=kernel_code,
         launcher_code=launcher_code,
         extra_imports=extra_imports,
+        extra_constants=extra_constants,
         principles_cited=principles_cited,
         predicted_effect=predicted_effect,
         raw_response=response_text,

@@ -167,17 +167,22 @@ def reconstruct_kernel_file(
     new_kernel_source: str,
     new_jit_launcher_source: str | None = None,
     extra_imports: list[str] | None = None,
+    extra_constants: list[str] | None = None,
 ) -> str:
     """Reconstruct a full runnable file with a new kernel implementation.
 
     Keeps the preamble, public launcher, reference function, and test inputs
     from the original (info).  Replaces the @cute.kernel function(s) and
-    optionally the @cute.jit host launcher.  Appends extra_imports that are
-    not already present in the preamble.
+    optionally the @cute.jit host launcher.  Appends extra_imports and
+    extra_constants that are not already present in the preamble.
     """
     preamble = info.preamble
     if extra_imports:
         new_lines = [ln for ln in extra_imports if ln.strip() and ln.strip() not in preamble]
+        if new_lines:
+            preamble = preamble + "\n" + "\n".join(new_lines)
+    if extra_constants:
+        new_lines = [ln for ln in extra_constants if ln.strip() and ln.strip() not in preamble]
         if new_lines:
             preamble = preamble + "\n" + "\n".join(new_lines)
 

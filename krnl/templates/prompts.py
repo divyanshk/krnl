@@ -96,6 +96,11 @@ or "NO CHANGE" if the launcher stays the same.
 in the parent file (e.g. `from cutlass.utils import SmemAllocator`). Write "NONE" if \
 no new imports are needed.
 
+7. **New Constants**: List any new module-level constants your kernel introduces \
+(e.g. `BLOCK_K = 16`). These MUST be plain `NAME = value` assignments. Write "NONE" \
+if no new constants are needed. Do NOT put constants as comments — they must be \
+actual assignments so the runtime can see them.
+
 Format your response with these tagged blocks:
 
 KERNEL_CODE
@@ -116,10 +121,17 @@ NEW_IMPORTS
 ```python
 from cutlass.utils import SmemAllocator
 ```
+
+NEW_CONSTANTS
+```python
+BLOCK_K = 16
+TILE_SIZE = 32
+```
 """
 
 VARIATION_PARSE_REGEX_KERNEL = r"KERNEL_CODE\s*```python\s*\n(.*?)```"
 VARIATION_PARSE_REGEX_LAUNCHER = r"LAUNCHER_CODE\s*```python\s*\n(.*?)```"
 VARIATION_PARSE_REGEX_IMPORTS = r"NEW_IMPORTS\s*```python\s*\n(.*?)```"
+VARIATION_PARSE_REGEX_CONSTANTS = r"NEW_CONSTANTS\s*```python\s*\n(.*?)```"
 VARIATION_PARSE_REGEX_PRINCIPLES = r"\*\*Principles Applied\*\*:?\s*(.*?)(?:\n\n|\*\*)"
 VARIATION_PARSE_REGEX_PREDICTED = r"\*\*Predicted Effect\*\*:?\s*(.*?)(?:\n\n|\*\*)"

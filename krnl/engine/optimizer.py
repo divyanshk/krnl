@@ -235,7 +235,8 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
             parent_kernel_info = _make_kernel_info_for_parent(kernel_info, parent_entry)
 
             var_source = reconstruct_kernel_file(
-                parent_kernel_info, gen.kernel_code, gen.launcher_code, gen.extra_imports
+                parent_kernel_info, gen.kernel_code, gen.launcher_code,
+                gen.extra_imports, gen.extra_constants,
             )  # gen.launcher_code is the new @cute.jit source (or None → keep original)
             var_path = var_dir / "kernel.py"
             var_path.write_text(var_source)

@@ -280,6 +280,35 @@ bar.wait()
 
 ---
 
+## Variable Initialization (CuTe DSL constraint)
+
+CuTe DSL traces through conditional branches at compile time. Any variable used
+after an `if` block MUST be initialized before that block — first assignment inside
+a conditional is not visible outside it.
+
+```python
+# WRONG — acc first assigned inside `if`, runtime will error
+if row < M and col < N:
+    acc = 0.0
+    for k in cutlass.range(K):
+        acc += a_ptr[row, k] * b_ptr[k, col]
+    c_ptr[row, col] = acc
+
+# CORRECT — initialize before any conditional
+acc = 0.0
+if row < M and col < N:
+    for k in cutlass.range(K):
+        acc += a_ptr[row, k] * b_ptr[k, col]
+    c_ptr[row, col] = acc
+```
+
+This applies to ALL variables: accumulators, temporaries, pointers. If the DSL
+errors with "cannot access local variable X where it is not associated with a value"
+or "Using variables defined in dynamic control flow is not supported", initialize X
+before the branch.
+
+---
+
 ## Module-Level Constants (tuning parameters)
 
 Any integer constant your kernel uses (tile sizes, unroll factors, etc.) MUST be

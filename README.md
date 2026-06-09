@@ -90,3 +90,8 @@ See `examples/` for fuller examples.
 - NVIDIA GPU with CUDA
 - Nsight Compute (`ncu`) installed and on PATH
 - `ANTHROPIC_API_KEY` environment variable set
+
+## Sample report
+
+<img width="611" height="361" alt="Screenshot 2026-05-14 at 6 12 24 PM" src="https://github.com/user-attachments/assets/7b93e343-6ed6-40c8-8679-ae9e053609a1" />
+

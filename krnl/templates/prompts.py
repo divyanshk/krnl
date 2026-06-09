@@ -17,8 +17,7 @@ Rules:
 2. You MUST cite which principle(s) from the provided PRINCIPLES you are applying.
 3. You MUST predict the expected performance effect of your changes.
 4. Only modify the @cute.kernel function(s) and the @cute.jit host launcher. Do NOT modify \
-the public Python launcher (launch / *_launch), the reference implementation, test inputs, \
-or imports unless absolutely necessary.
+the public Python launcher (launch / *_launch), the reference implementation, test inputs.
 5. Preserve the function signatures of the @cute.jit launcher and test inputs generator.
 6. Be specific about what you changed and why.
 7. Study the dead ends carefully — do not re-apply strategies that have already failed or regressed.
@@ -92,9 +91,10 @@ Include the complete function, not just the diff.
 5. **Complete Launcher Code**: The full @cute.jit launcher if it needs to change, \
 or "NO CHANGE" if the launcher stays the same.
 
-6. **New Imports**: List any new import lines your kernel requires that are NOT already \
-in the parent file (e.g. `from cutlass.utils import SmemAllocator`). Write "NONE" if \
-no new imports are needed.
+6. **New Imports**: List ALL import lines your kernel requires that are not already \
+in the parent file. Assume that any new CuTe DSL components, utilities, or constants \
+you use will need to be imported (e.g. `from cutlass.utils import SmemAllocator`). \
+Write "NONE" only if you are 100% certain every symbol you use is already imported.
 
 7. **New Constants**: List any new module-level constants your kernel introduces \
 (e.g. `BLOCK_K = 16`). These MUST be plain `NAME = value` assignments. Write "NONE" \

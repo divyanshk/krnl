@@ -92,16 +92,27 @@ Include the complete function, not just the diff.
 or "NO CHANGE" if the launcher stays the same.
 
 6. **New Imports**: List ALL import lines your kernel requires that are not already \
-in the parent file. Assume that any new CuTe DSL components, utilities, or constants \
-you use will need to be imported (e.g. `from cutlass.utils import SmemAllocator`). \
-Write "NONE" only if you are 100% certain every symbol you use is already imported.
+in the parent file. The parent file imports only `math`, `torch`, `torch.nn.functional as F`, \
+`cutlass`, and `cutlass.cute as cute` — anything else MUST be declared here. \
+**Common gotchas (bare/unprefixed symbols that always need an import):** \
+`SmemAllocator` → `from cutlass.utils import SmemAllocator`; \
+`Float16`/`Float32`/`BFloat16`/`Boolean`/`Int32` → `from cutlass.cute.typing import …`; \
+`from_dlpack` → `from cutlass.cute.runtime import from_dlpack`. \
+Anything reached via the `cute.` prefix (`cute.arch.sync_threads`, `cute.make_layout`, \
+`cute.make_copy_atom`, etc.) is already importable through `cutlass.cute as cute` and does NOT \
+need a new import. Write "NONE" only if you are 100% certain every bare symbol you use is \
+already imported.
 
 7. **New Constants**: List any new module-level constants your kernel introduces \
 (e.g. `BLOCK_K = 16`). These MUST be plain `NAME = value` assignments. Write "NONE" \
 if no new constants are needed. Do NOT put constants as comments — they must be \
 actual assignments so the runtime can see them.
 
-Format your response with these tagged blocks:
+Format your response with these tagged blocks. **All four blocks (KERNEL_CODE, \
+LAUNCHER_CODE, NEW_IMPORTS, NEW_CONSTANTS) MUST be present** — write "NONE" or \
+"NO CHANGE" for empty ones, never omit a block. Each code block MUST open with \
+the literal three-backtick fence followed by `python` (the language tag is required \
+by the parser):
 
 KERNEL_CODE
 ```python
@@ -127,11 +138,25 @@ NEW_CONSTANTS
 BLOCK_K = 16
 TILE_SIZE = 32
 ```
+
+## Self-check before submitting
+
+Mentally verify, in order:
+1. All four blocks above are present and each uses the ```python fence.
+2. Every bare (unprefixed) symbol referenced in KERNEL_CODE or LAUNCHER_CODE is either:
+   (a) a function parameter / local, or
+   (b) listed in NEW_CONSTANTS, or
+   (c) imported in the parent file, or
+   (d) declared in NEW_IMPORTS.
+   Pay specific attention to: `SmemAllocator`, `Float16/32`, `BFloat16`, `Boolean`, \
+`Int32`, `from_dlpack` — these are the symbols most commonly forgotten.
+3. Every constant used in a layout (e.g. `BLOCK_K`) is defined at module scope \
+(in the parent file or in NEW_CONSTANTS), not inside the kernel body.
 """
 
-VARIATION_PARSE_REGEX_KERNEL = r"KERNEL_CODE\s*```python\s*\n(.*?)```"
-VARIATION_PARSE_REGEX_LAUNCHER = r"LAUNCHER_CODE\s*```python\s*\n(.*?)```"
-VARIATION_PARSE_REGEX_IMPORTS = r"NEW_IMPORTS\s*```python\s*\n(.*?)```"
-VARIATION_PARSE_REGEX_CONSTANTS = r"NEW_CONSTANTS\s*```python\s*\n(.*?)```"
+VARIATION_PARSE_REGEX_KERNEL = r"KERNEL_CODE\s*```(?:python|py)?\s*\n(.*?)```"
+VARIATION_PARSE_REGEX_LAUNCHER = r"LAUNCHER_CODE\s*```(?:python|py)?\s*\n(.*?)```"
+VARIATION_PARSE_REGEX_IMPORTS = r"NEW_IMPORTS\s*```(?:python|py)?\s*\n(.*?)```"
+VARIATION_PARSE_REGEX_CONSTANTS = r"NEW_CONSTANTS\s*```(?:python|py)?\s*\n(.*?)```"
 VARIATION_PARSE_REGEX_PRINCIPLES = r"\*\*Principles Applied\*\*:?\s*(.*?)(?:\n\n|\*\*)"
 VARIATION_PARSE_REGEX_PREDICTED = r"\*\*Predicted Effect\*\*:?\s*(.*?)(?:\n\n|\*\*)"

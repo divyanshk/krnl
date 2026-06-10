@@ -162,6 +162,18 @@ def _has_cute_jit_decorator(node: ast.FunctionDef) -> bool:
     return False
 
 
+_AUTO_IMPORT_MAP: dict[str, str] = {
+    # cutlass utilities the LLM keeps referencing without declaring
+    "SmemAllocator": "from cutlass.utils import SmemAllocator",
+    "from_dlpack":   "from cutlass.cute.runtime import from_dlpack",
+    "Float16":       "from cutlass.cute.typing import Float16",
+    "Float32":       "from cutlass.cute.typing import Float32",
+    "BFloat16":      "from cutlass.cute.typing import BFloat16",
+    "Boolean":       "from cutlass.cute.typing import Boolean",
+    "Int32":         "from cutlass.cute.typing import Int32",
+}
+
+
 def reconstruct_kernel_file(
     info: KernelInfo,
     new_kernel_source: str,
@@ -175,8 +187,24 @@ def reconstruct_kernel_file(
     from the original (info).  Replaces the @cute.kernel function(s) and
     optionally the @cute.jit host launcher.  Appends extra_imports and
     extra_constants that are not already present in the preamble.
+
+    Also auto-injects imports for well-known cutlass symbols (SmemAllocator,
+    Float16, etc.) when the kernel source references them but the LLM forgot
+    to declare them in NEW_IMPORTS.
     """
     preamble = info.preamble
+
+    # Safety net: auto-inject imports for known symbols the LLM forgot.
+    # Runs before user-supplied extra_imports so explicit imports still win.
+    auto_imports: list[str] = []
+    jit_src_for_scan = new_jit_launcher_source or (info.jit_launcher_source or "")
+    full_scan = new_kernel_source + "\n" + jit_src_for_scan
+    for symbol, import_line in _AUTO_IMPORT_MAP.items():
+        if symbol in full_scan and import_line not in preamble:
+            auto_imports.append(import_line)
+    if auto_imports:
+        preamble = preamble + "\n" + "\n".join(auto_imports)
+
     if extra_imports:
         new_lines = [ln for ln in extra_imports if ln.strip() and ln.strip() not in preamble]
         if new_lines:

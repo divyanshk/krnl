@@ -240,6 +240,8 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
             )  # gen.launcher_code is the new @cute.jit source (or None → keep original)
             var_path = var_dir / "kernel.py"
             var_path.write_text(var_source)
+            # Persist raw LLM response for debuggability (parse failures, missing imports, etc.)
+            (var_dir / "raw_response.txt").write_text(gen.raw_response)
             console.print(f"    Written: {var_path}")
 
             # Compute diff vs parent kernel source

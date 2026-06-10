@@ -7,11 +7,11 @@ from pathlib import Path
 # ── NCU metrics ───────────────────────────────────────────────────────────────
 # Tier 1: roofline position (always collected)
 _TIER1 = [
-    "gpu__time_duration.sum",                     # kernel wall time (ns)
-    "sm__throughput.avg.pct_of_peak_sustained",   # compute throughput %
-    "dram__throughput.avg.pct_of_peak_sustained", # HBM bandwidth %
-    "launch__occupancy",                          # achieved occupancy (0–1)
-    "sm__warps_active.avg.pct_of_peak_sustained", # active warps %
+    "gpu__time_duration.sum",                                  # kernel wall time (ns)
+    "sm__throughput.avg.pct_of_peak_sustained_elapsed",        # compute throughput %
+    "dram__throughput.avg.pct_of_peak_sustained_elapsed",      # HBM bandwidth %
+    "sm__warps_active.avg.pct_of_peak_sustained_active",       # achieved occupancy %
+    "sm__ctas_active.avg.pct_of_peak_sustained_elapsed",       # CTA utilization over elapsed time
 ]
 
 # Tier 2: causal diagnostics — explains WHY the kernel is at its roofline position
@@ -23,8 +23,8 @@ _TIER2 = [
     # Memory access quality
     "l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio",  # coalescing: global loads  (ideal=1.0)
     "l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_st.ratio",  # coalescing: global stores (ideal=1.0)
-    "l1tex__t_hit_rate.pct",                      # L1 cache hit rate %
-    "l2__t_hit_rate.pct",                         # L2 cache hit rate %
+    "l1tex__t_sector_hit_rate.pct",               # L1 cache hit rate %
+    "lts__t_sector_hit_rate.pct",                 # L2 cache hit rate %
 
     # Warp stall reasons (% of active warp cycles spent stalling on each cause)
     "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct",   # memory latency (HBM/L2)

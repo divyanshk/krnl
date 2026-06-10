@@ -20,10 +20,11 @@ class NCUMetrics:
 
     # ── Tier 1: roofline position ─────────────────────────────────────────
     duration_ns: float = 0.0
-    compute_throughput_pct: float = 0.0   # sm__throughput.avg.pct_of_peak_sustained
-    memory_throughput_pct: float = 0.0    # dram__throughput.avg.pct_of_peak_sustained
-    occupancy: float = 0.0                # launch__occupancy (0–1)
-    active_warps_pct: float = 0.0         # sm__warps_active.avg.pct_of_peak_sustained
+    compute_throughput_pct: float = 0.0   # sm__throughput.avg.pct_of_peak_sustained_elapsed
+    memory_throughput_pct: float = 0.0    # dram__throughput.avg.pct_of_peak_sustained_elapsed
+    occupancy: float = 0.0                # achieved occupancy (0–1) = sm__warps_active.../100
+    active_warps_pct: float = 0.0         # sm__warps_active.avg.pct_of_peak_sustained_active
+    cta_utilization_pct: float = 0.0      # sm__ctas_active.avg.pct_of_peak_sustained_elapsed
 
     # ── Tier 2: causal diagnostics ────────────────────────────────────────
 
@@ -34,8 +35,8 @@ class NCUMetrics:
     # Memory access quality
     sectors_per_request_ld: float = 0.0   # l1tex__average_t_sectors_per_request...ld (ideal=1.0)
     sectors_per_request_st: float = 0.0   # l1tex__average_t_sectors_per_request...st
-    l1_hit_rate_pct: float = 0.0          # l1tex__t_hit_rate.pct
-    l2_hit_rate_pct: float = 0.0          # l2__t_hit_rate.pct
+    l1_hit_rate_pct: float = 0.0          # l1tex__t_sector_hit_rate.pct
+    l2_hit_rate_pct: float = 0.0          # lts__t_sector_hit_rate.pct
 
     # Warp stall reasons (% of active cycles)
     stall_long_scoreboard_pct: float = 0.0    # memory latency (HBM/L2)
@@ -50,16 +51,16 @@ class NCUMetrics:
         """Return all metrics as {ncu_metric_name: float} for principles matching."""
         structured = {
             "gpu__time_duration.sum": self.duration_ns,
-            "sm__throughput.avg.pct_of_peak_sustained": self.compute_throughput_pct,
-            "dram__throughput.avg.pct_of_peak_sustained": self.memory_throughput_pct,
-            "launch__occupancy": self.occupancy,
-            "sm__warps_active.avg.pct_of_peak_sustained": self.active_warps_pct,
+            "sm__throughput.avg.pct_of_peak_sustained_elapsed": self.compute_throughput_pct,
+            "dram__throughput.avg.pct_of_peak_sustained_elapsed": self.memory_throughput_pct,
+            "sm__warps_active.avg.pct_of_peak_sustained_active": self.active_warps_pct,
+            "sm__ctas_active.avg.pct_of_peak_sustained_elapsed": self.cta_utilization_pct,
             "launch__registers_per_thread": self.registers_per_thread,
             "sm__maximum_warps_per_active_cycle_pct": self.theoretical_occupancy_pct,
             "l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio": self.sectors_per_request_ld,
             "l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_st.ratio": self.sectors_per_request_st,
-            "l1tex__t_hit_rate.pct": self.l1_hit_rate_pct,
-            "l2__t_hit_rate.pct": self.l2_hit_rate_pct,
+            "l1tex__t_sector_hit_rate.pct": self.l1_hit_rate_pct,
+            "lts__t_sector_hit_rate.pct": self.l2_hit_rate_pct,
             "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct": self.stall_long_scoreboard_pct,
             "smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct": self.stall_short_scoreboard_pct,
             "smsp__warp_issue_stalled_barrier_per_warp_active.pct": self.stall_barrier_pct,
@@ -77,6 +78,7 @@ class NCUMetrics:
             f"  Memory Throughput:       {self.memory_throughput_pct:.1f}%",
             f"  Occupancy:               {self.occupancy:.2f}  (theoretical max: {self.theoretical_occupancy_pct:.1f}%)",
             f"  Active Warps:            {self.active_warps_pct:.1f}%",
+            f"  CTA Utilization:         {self.cta_utilization_pct:.1f}%  (over elapsed time)",
             f"  Registers/thread:        {self.registers_per_thread:.0f}",
             f"  Sectors/request (load):  {self.sectors_per_request_ld:.2f}  (ideal=1.0)",
             f"  Sectors/request (store): {self.sectors_per_request_st:.2f}",
@@ -281,14 +283,16 @@ def _parse_ncu_csv(csv_output: str) -> list[NCUMetrics]:
 
     results = []
     for kernel_name, raw in kernels.items():
+        active_warps_pct = _safe_float(raw.get("sm__warps_active.avg.pct_of_peak_sustained_active", "0"))
         m = NCUMetrics(
             kernel_name=kernel_name,
             # Tier 1
             duration_ns=_safe_float(raw.get("gpu__time_duration.sum", "0")),
-            compute_throughput_pct=_safe_float(raw.get("sm__throughput.avg.pct_of_peak_sustained", "0")),
-            memory_throughput_pct=_safe_float(raw.get("dram__throughput.avg.pct_of_peak_sustained", "0")),
-            occupancy=_safe_float(raw.get("launch__occupancy", "0")),
-            active_warps_pct=_safe_float(raw.get("sm__warps_active.avg.pct_of_peak_sustained", "0")),
+            compute_throughput_pct=_safe_float(raw.get("sm__throughput.avg.pct_of_peak_sustained_elapsed", "0")),
+            memory_throughput_pct=_safe_float(raw.get("dram__throughput.avg.pct_of_peak_sustained_elapsed", "0")),
+            occupancy=active_warps_pct / 100.0,   # achieved occupancy as 0–1
+            active_warps_pct=active_warps_pct,
+            cta_utilization_pct=_safe_float(raw.get("sm__ctas_active.avg.pct_of_peak_sustained_elapsed", "0")),
             # Tier 2 — occupancy
             registers_per_thread=_safe_float(raw.get("launch__registers_per_thread", "0")),
             theoretical_occupancy_pct=_safe_float(raw.get("sm__maximum_warps_per_active_cycle_pct", "0")),
@@ -297,8 +301,8 @@ def _parse_ncu_csv(csv_output: str) -> list[NCUMetrics]:
                 "l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio", "0")),
             sectors_per_request_st=_safe_float(raw.get(
                 "l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_st.ratio", "0")),
-            l1_hit_rate_pct=_safe_float(raw.get("l1tex__t_hit_rate.pct", "0")),
-            l2_hit_rate_pct=_safe_float(raw.get("l2__t_hit_rate.pct", "0")),
+            l1_hit_rate_pct=_safe_float(raw.get("l1tex__t_sector_hit_rate.pct", "0")),
+            l2_hit_rate_pct=_safe_float(raw.get("lts__t_sector_hit_rate.pct", "0")),
             # Tier 2 — stall reasons
             stall_long_scoreboard_pct=_safe_float(raw.get(
                 "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct", "0")),

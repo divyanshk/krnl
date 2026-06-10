@@ -31,7 +31,7 @@ krnl my_kernel.py \
   --beam-width 2 \
   --atol 1e-3 \
   --rtol 1e-3 \
-  --model claude-sonnet-4-20250514 \
+  --model claude-sonnet-4-6 \
   -v
 ```
 

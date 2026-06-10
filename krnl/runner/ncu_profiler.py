@@ -26,6 +26,12 @@ class NCUMetrics:
     active_warps_pct: float = 0.0         # sm__warps_active.avg.pct_of_peak_sustained_active
     cta_utilization_pct: float = 0.0      # sm__ctas_active.avg.pct_of_peak_sustained_elapsed
 
+    # ── Tier 1.5: Speed-of-Light section (from --section SpeedOfLight) ────
+    sol_combined_pct: float = 0.0         # max(SM SOL, Memory SOL) — single roofline %
+    l1_throughput_pct: float = 0.0        # L1/TEX cache pipeline SOL %
+    l2_throughput_pct: float = 0.0        # L2 cache pipeline SOL %
+    sol_bottleneck_text: str = ""         # NCU's own verdict (SOLBottleneck rule)
+
     # ── Tier 2: causal diagnostics ────────────────────────────────────────
 
     # Occupancy limiters
@@ -55,6 +61,9 @@ class NCUMetrics:
             "dram__throughput.avg.pct_of_peak_sustained_elapsed": self.memory_throughput_pct,
             "sm__warps_active.avg.pct_of_peak_sustained_active": self.active_warps_pct,
             "sm__ctas_active.avg.pct_of_peak_sustained_elapsed": self.cta_utilization_pct,
+            "sol_combined_pct": self.sol_combined_pct,
+            "L1/TEX Cache Throughput": self.l1_throughput_pct,
+            "L2 Cache Throughput": self.l2_throughput_pct,
             "launch__registers_per_thread": self.registers_per_thread,
             "sm__maximum_warps_per_active_cycle_pct": self.theoretical_occupancy_pct,
             "l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio": self.sectors_per_request_ld,
@@ -79,6 +88,9 @@ class NCUMetrics:
             f"  Occupancy:               {self.occupancy:.2f}  (theoretical max: {self.theoretical_occupancy_pct:.1f}%)",
             f"  Active Warps:            {self.active_warps_pct:.1f}%",
             f"  CTA Utilization:         {self.cta_utilization_pct:.1f}%  (over elapsed time)",
+            f"  Combined SOL:            {self.sol_combined_pct:.1f}%  (max of compute/memory)",
+            f"  L1/TEX Throughput:       {self.l1_throughput_pct:.1f}%",
+            f"  L2 Throughput:           {self.l2_throughput_pct:.1f}%",
             f"  Registers/thread:        {self.registers_per_thread:.0f}",
             f"  Sectors/request (load):  {self.sectors_per_request_ld:.2f}  (ideal=1.0)",
             f"  Sectors/request (store): {self.sectors_per_request_st:.2f}",
@@ -93,6 +105,10 @@ class NCUMetrics:
     def bottleneck_summary(self) -> str:
         """Diagnose the primary bottleneck using causal metrics where available."""
         issues = []
+
+        # NCU's own SOL verdict — surface verbatim if present (NVIDIA-authored)
+        if self.sol_bottleneck_text:
+            issues.append(f"NCU SOL VERDICT: {self.sol_bottleneck_text.strip()}")
 
         # Coalescing check (most specific — overrides generic memory diagnosis)
         if self.sectors_per_request_ld > 2.0:
@@ -236,6 +252,7 @@ def _run_ncu(
         ncu_bin,
         "--csv",
         "--metrics", metrics_arg,
+        "--section", "SpeedOfLight",   # adds L1/L2 SOL + NCU's own SOLBottleneck verdict
         "--target-processes", "all",
     ]
 
@@ -273,26 +290,44 @@ def _parse_ncu_csv(csv_output: str) -> list[NCUMetrics]:
     reader = csv.DictReader(io.StringIO(csv_text))
 
     kernels: dict[str, dict[str, str]] = {}
+    rules: dict[str, dict[str, str]] = {}   # kernel -> {rule_name: rule_description}
     for row in reader:
         kernel_name = row.get("Kernel Name", "unknown")
-        metric_name = row.get("Metric Name", "")
-        metric_value = row.get("Metric Value", "0")
         if kernel_name not in kernels:
             kernels[kernel_name] = {}
+            rules[kernel_name] = {}
+
+        # Section rules (e.g. SOLBottleneck) carry their verdict in Rule Description,
+        # not Metric Value — Metric Name is empty for these rows.
+        rule_name = row.get("Rule Name", "") or ""
+        if rule_name:
+            rules[kernel_name][rule_name] = row.get("Rule Description", "") or ""
+            continue
+
+        metric_name = row.get("Metric Name", "")
+        metric_value = row.get("Metric Value", "0")
         kernels[kernel_name][metric_name] = metric_value
 
     results = []
     for kernel_name, raw in kernels.items():
+        kernel_rules = rules.get(kernel_name, {})
         active_warps_pct = _safe_float(raw.get("sm__warps_active.avg.pct_of_peak_sustained_active", "0"))
+        compute_pct = _safe_float(raw.get("sm__throughput.avg.pct_of_peak_sustained_elapsed", "0"))
+        memory_pct = _safe_float(raw.get("dram__throughput.avg.pct_of_peak_sustained_elapsed", "0"))
         m = NCUMetrics(
             kernel_name=kernel_name,
             # Tier 1
             duration_ns=_safe_float(raw.get("gpu__time_duration.sum", "0")),
-            compute_throughput_pct=_safe_float(raw.get("sm__throughput.avg.pct_of_peak_sustained_elapsed", "0")),
-            memory_throughput_pct=_safe_float(raw.get("dram__throughput.avg.pct_of_peak_sustained_elapsed", "0")),
+            compute_throughput_pct=compute_pct,
+            memory_throughput_pct=memory_pct,
             occupancy=active_warps_pct / 100.0,   # achieved occupancy as 0–1
             active_warps_pct=active_warps_pct,
             cta_utilization_pct=_safe_float(raw.get("sm__ctas_active.avg.pct_of_peak_sustained_elapsed", "0")),
+            # Tier 1.5 — SOL section
+            sol_combined_pct=max(compute_pct, memory_pct),
+            l1_throughput_pct=_safe_float(raw.get("L1/TEX Cache Throughput", "0")),
+            l2_throughput_pct=_safe_float(raw.get("L2 Cache Throughput", "0")),
+            sol_bottleneck_text=kernel_rules.get("SOLBottleneck", ""),
             # Tier 2 — occupancy
             registers_per_thread=_safe_float(raw.get("launch__registers_per_thread", "0")),
             theoretical_occupancy_pct=_safe_float(raw.get("sm__maximum_warps_per_active_cycle_pct", "0")),

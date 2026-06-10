@@ -1,0 +1,119 @@
+## 1. Principles Applied
+
+**Memory Coalescing** (primary) and **Minimize Global Memory Traffic**.
+
+The bottleneck is uncoalesced loads (sectors_per_request_ld=3.4) and memory latency. The data layout is `(BATCH, HIDDEN, SEQ)` — innermost dim is SEQ. In v0, `threadIdx.x = tx` maps to `s` (the SEQ dim) and `threadIdx.y = ty` maps to `h` (the HIDDEN dim). With `BLOCK_S=32`, a warp (32 threads) has fixed `ty` (fixed `h`) and varying `tx` (varying `s`). Since SEQ is the stride-1 dim, consecutive `s` values ARE contiguous in memory — but the conv window access `pos = s - k` for the inner loop creates overlapping reads across the warp, and the per-tap weight read `w_ptr[h, ...]` is broadcast but the b/x reads at `pos = s-k` shift the warp's base address, causing partial-sector duplication.
+
+The key fix: a warp accessing `b_ptr[batch, h, s]` for s=0..31 is contiguous (good), but for `pos=s-k`, the 32 lanes still read 32 contiguous addresses shifted by `k`, which only crosses one extra 128B boundary. The real inefficiency is **redundant reload of the same b/x values** across the conv window. Each `b[h,pos]*x[h,pos]` product is needed by up to K=4 output positions. By loading a tile of `Bx = b*x` into shared memory once (with a halo of K-1 leftward), every value is read from HBM exactly once instead of ~K times, eliminating the overlapping-read inflation that drives sectors_per_request up.
+
+## 2. Predicted Effect
+
+- `sectors_per_request_ld` should drop from 3.4 toward ~1.0–1.5 (shared-mem loads are perfectly coalesced contiguous tiles).
+- Global load traffic for b/x cut by ~K× (4×) → fewer HBM round-trips.
+- `stall_long_scoreboard` should fall from 67.5%; duration should drop ~10–20% (roofline says ~1.1x, but traffic reduction may exceed that).
+
+## 3. Changes Made
+
+Each block loads a `(BLOCK_H, BLOCK_S + CONV_K - 1)` tile of the product `Bx = b*x` into shared memory with a left halo of `CONV_K-1`. Threads cooperatively load the halo + main region (coalesced contiguous loads along SEQ), then the conv reads happen entirely from shared memory. C and the final store remain coalesced global accesses. Weights `w_ptr[h,k]` are read once per thread row.
+
+## 4. Complete Kernel Code
+
+KERNEL_CODE
+```python
+@cute.kernel
+def kernel(
+    b_ptr,
+    c_ptr,
+    x_ptr,
+    w_ptr,
+    bias_ptr,
+    y_ptr,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    bx, by, bz = cute.arch.block_idx()
+    tx, ty, _ = cute.arch.thread_idx()
+
+    batch_idx = bz
+    h = by * BLOCK_H + ty
+    s_base = bx * BLOCK_S
+
+    # Shared tile holds Bx = b*x for [BLOCK_H rows] x [BLOCK_S + halo cols]
+    # column j in smem corresponds to seq index (s_base - (CONV_K-1) + j)
+    smem_alloc = SmemAllocator()
+    smem_bx = smem_alloc.allocate_tensor(
+        cutlass.Float32,
+        cute.make_layout((BLOCK_H, SMEM_COLS), stride=(SMEM_COLS, 1)),
+        16,
+    )
+
+    halo = CONV_K - 1
+
+    # Cooperative load: each thread loads SMEM_COLS/BLOCK_S-ish columns.
+    # Loop over all smem columns in strides of BLOCK_S using tx.
+    j = tx
+    while j < SMEM_COLS:
+        seq_idx = s_base - halo + j
+        val = 0.0
+        if h < HIDDEN and seq_idx >= 0 and seq_idx < SEQ:
+            val = b_ptr[batch_idx, h, seq_idx] * x_ptr[batch_idx, h, seq_idx]
+        smem_bx[ty, j] = val
+        j = j + BLOCK_S
+
+    cute.arch.sync_threads()
+
+    s = s_base + tx
+    acc = 0.0
+    if h < HIDDEN and s < SEQ:
+        acc = bias_ptr[h]
+        # column in smem for current s is (s - s_base + halo) = tx + halo
+        # for tap k, pos = s - k -> smem col = tx + halo - k
+        for k in cutlass.range(CONV_K):
+            col = tx + halo - k
+            pos = s - k
+            if pos >= 0:
+                acc += smem_bx[ty, col] * w_ptr[h, CONV_K - 1 - k]
+        y_ptr[batch_idx, h, s] = c_ptr[batch_idx, h, s] * acc
+```
+
+## 5. Complete Launcher Code
+
+LAUNCHER_CODE
+```python
+@cute.jit
+def host(
+    b_t: torch.Tensor,
+    c_t: torch.Tensor,
+    x_t: torch.Tensor,
+    w_t: torch.Tensor,
+    bias_t: torch.Tensor,
+    y_t: torch.Tensor,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    grid = (math.ceil(SEQ / BLOCK_S), math.ceil(HIDDEN / BLOCK_H), BATCH)
+    kernel(
+        b_t, c_t, x_t, w_t, bias_t, y_t,
+        BATCH, HIDDEN, SEQ, CONV_K,
+    ).launch(grid=grid, block=(BLOCK_S, BLOCK_H, 1))
+```
+
+## 6. New Imports
+
+NEW_IMPORTS
+```python
+from cutlass.utils import SmemAllocator
+```
+
+## 7. New Constants
+
+NEW_CONSTANTS
+```python
+SMEM_COLS = 35
+```
+
+Note: `SMEM_COLS = BLOCK_S + CONV_K - 1 = 32 + 4 - 1 = 35`, matching the test config (CONV_K=4). This covers the left halo needed for the causal conv window.

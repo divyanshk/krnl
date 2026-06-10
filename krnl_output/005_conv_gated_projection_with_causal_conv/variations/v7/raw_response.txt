@@ -1,0 +1,138 @@
+## Analysis
+
+The kernel is **memory latency bound** (long_scoreboard=72%) with **uncoalesced loads** (sectors_per_request_ld=2.1). The key issue: the block layout uses `BLOCK_S=32` threads in `tx` and `BLOCK_H=8` rows in `ty`. The innermost (warp) thread index is `tx` which strides along the seq (last) dimension — that IS coalesced for a fixed `h`. But the warp spans 32 tx threads for one `ty`, and the issue is the per-thread accesses of `b_ptr[batch,h,seq]` and `x_ptr` are separate arrays causing 2 distinct streams.
+
+The biggest lever: v2 (best, 258848 ns) restructured to use only `tx` threading. The remaining headroom shows compute is heavily underutilized (30.8%). The real win is to **increase work per thread (register reuse along seq)** so each thread loads a strip of B/x once and computes multiple outputs, amortizing the halo overlap and improving the load/compute ratio. This reduces the total number of memory transactions (each smem column loaded once, but more outputs per load) and increases ILP.
+
+I'll have each thread process `SEQ_PER_THREAD` consecutive output columns, loading B and x into registers once and reusing across the sliding conv window. This minimizes redundant smem traffic and global loads while keeping coalescing.
+
+## 1. Principles Applied
+
+- **Minimize Global Memory Traffic**: each thread loads its B/x values once into registers and reuses across overlapping conv windows, reducing redundant smem reads and improving the compute-to-memory ratio.
+- **Shared Memory Tiling**: keep the tile in smem but increase output tile width so the halo (CONV_K-1) is amortized over more outputs.
+
+## 2. Predicted Effect
+
+By having each thread compute `SEQ_PER_THREAD=4` consecutive outputs, the halo overhead (3 extra cols per 32) amortizes over a 128-wide tile (3 per 128). This raises arithmetic intensity, should reduce `stall_long_scoreboard` toward ~60%, raise compute utilization, and shrink duration ~3-6%. Loads stay coalesced (tx maps to stride-1 seq).
+
+## 3. Changes Made
+
+Relative to v3: each block now covers `BLOCK_S * SEQ_PER_THREAD` seq columns. Threads cooperatively load the wider smem tile (with halo), then each thread emits `SEQ_PER_THREAD` outputs reusing the conv window from registers/smem.
+
+KERNEL_CODE
+```python
+@cute.kernel
+def kernel(
+    b_ptr,
+    c_ptr,
+    x_ptr,
+    w_ptr,
+    bias_ptr,
+    y_ptr,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    bx, by, bz = cute.arch.block_idx()
+    tx, ty, _ = cute.arch.thread_idx()
+
+    batch_idx = bz
+    h = by * BLOCK_H + ty
+    # each block covers TILE_W = BLOCK_S * SEQ_PER_THREAD output columns
+    s_base = bx * TILE_W
+
+    smem_alloc = SmemAllocator()
+    smem_bx = smem_alloc.allocate_tensor(
+        cutlass.Float32,
+        cute.make_layout((BLOCK_H, SMEM_COLS_WIDE), stride=(SMEM_COLS_WIDE, 1)),
+        16,
+    )
+
+    halo = CONV_K - 1
+
+    # Cooperative coalesced load: smem column j -> seq index (s_base - halo + j)
+    j = tx
+    while j < SMEM_COLS_WIDE:
+        seq_idx = s_base - halo + j
+        val = 0.0
+        if h < HIDDEN and seq_idx >= 0 and seq_idx < SEQ:
+            val = b_ptr[batch_idx, h, seq_idx] * x_ptr[batch_idx, h, seq_idx]
+        smem_bx[ty, j] = val
+        j = j + BLOCK_S
+
+    cute.arch.sync_threads()
+
+    # Preload conv weights into registers (reused across all outputs of this thread)
+    w0 = 0.0
+    w1 = 0.0
+    w2 = 0.0
+    w3 = 0.0
+    bval = 0.0
+    if h < HIDDEN:
+        bval = bias_ptr[h]
+        # weight for lag k (pos=s-k) is W[h, CONV_K-1-k]
+        w0 = w_ptr[h, CONV_K - 1 - 0]
+        if CONV_K > 1:
+            w1 = w_ptr[h, CONV_K - 1 - 1]
+        if CONV_K > 2:
+            w2 = w_ptr[h, CONV_K - 1 - 2]
+        if CONV_K > 3:
+            w3 = w_ptr[h, CONV_K - 1 - 3]
+
+    # Each thread computes SEQ_PER_THREAD consecutive outputs.
+    # Thread tx owns output columns: s = s_base + tx + p*BLOCK_S  for p in [0, SEQ_PER_THREAD)
+    if h < HIDDEN:
+        for p in cutlass.range(SEQ_PER_THREAD):
+            s = s_base + tx + p * BLOCK_S
+            if s < SEQ:
+                # smem column for current s is (s - s_base + halo)
+                col_cur = tx + p * BLOCK_S + halo
+                acc = bval
+                # tap k=0 (col_cur), k=1 (col_cur-1), ...
+                acc += smem_bx[ty, col_cur] * w0
+                if CONV_K > 1:
+                    if (s - 1) >= 0:
+                        acc += smem_bx[ty, col_cur - 1] * w1
+                if CONV_K > 2:
+                    if (s - 2) >= 0:
+                        acc += smem_bx[ty, col_cur - 2] * w2
+                if CONV_K > 3:
+                    if (s - 3) >= 0:
+                        acc += smem_bx[ty, col_cur - 3] * w3
+                y_ptr[batch_idx, h, s] = c_ptr[batch_idx, h, s] * acc
+```
+
+LAUNCHER_CODE
+```python
+@cute.jit
+def host(
+    b_t: torch.Tensor,
+    c_t: torch.Tensor,
+    x_t: torch.Tensor,
+    w_t: torch.Tensor,
+    bias_t: torch.Tensor,
+    y_t: torch.Tensor,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    grid = (math.ceil(SEQ / TILE_W), math.ceil(HIDDEN / BLOCK_H), BATCH)
+    kernel(
+        b_t, c_t, x_t, w_t, bias_t, y_t,
+        BATCH, HIDDEN, SEQ, CONV_K,
+    ).launch(grid=grid, block=(BLOCK_S, BLOCK_H, 1))
+```
+
+NEW_IMPORTS
+```python
+from cutlass.utils import SmemAllocator
+```
+
+NEW_CONSTANTS
+```python
+SEQ_PER_THREAD = 4
+TILE_W = 128
+SMEM_COLS_WIDE = 131
+```

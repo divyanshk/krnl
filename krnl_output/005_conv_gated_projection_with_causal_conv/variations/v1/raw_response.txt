@@ -1,0 +1,115 @@
+## Analysis
+
+The key bottleneck is **uncoalesced loads** (sectors_per_request_ld=3.4). The data layout is `(BATCH, HIDDEN, SEQ)` with stride `(HIDDEN*SEQ, SEQ, 1)`. In the current block layout, `threadIdx.x = tx` maps to `s` (the seq dim, stride-1) and `threadIdx.y = ty` maps to `h` (stride SEQ). 
+
+A warp = 32 threads. With `block=(BLOCK_S=32, BLOCK_H=8, 1)`, threads in a warp share the same `ty` (since x dimension is 32 = full warp width) and vary only in `tx`. So within a warp, all threads have the same `h` and consecutive `s` → element `[batch, h, s]` is contiguous along `s` (stride-1). That should already be coalesced!
+
+The problem: the **conv window** reads `pos = s - k`. For `tx=0..31`, `pos` spans `s-k` which is still consecutive in `s` → contiguous. But the issue is each tap is a *separate load*, and at tile boundaries `pos < 0` predication causes divergent/misaligned access. The 3.4 sectors comes mostly from the **redundant repeated loads** of overlapping windows and unaligned starting offsets.
+
+The best fix: **shared memory tiling along the seq dim** with halo. Each block loads a contiguous tile of B and x (plus CONV_K-1 halo on the left) into shared memory, computes `Bx = B*x` once, then performs the conv from SRAM. This eliminates redundant HBM reads of overlapping conv windows and turns the per-tap loads into coalesced single-pass loads.
+
+## Response
+
+1. **Principles Applied**: 
+   - **Shared Memory Tiling** — load each contiguous seq-tile of B and x (plus left halo of CONV_K-1) into SRAM once, compute `Bx` once, then run the conv from shared memory. This removes the CONV_K× redundant overlapping-window HBM reads.
+   - **Minimize Global Memory Traffic** — instead of reloading B[pos] and x[pos] for each of the CONV_K taps (overlapping windows), each element is loaded exactly once into shared memory.
+
+2. **Predicted Effect**: `sectors_per_request_ld` should drop from 3.4 toward ~1.0–1.5 since each global load is now a single coalesced streaming pass. `stall_long_scoreboard` (67.5%) should fall significantly as the conv-window reuse comes from SRAM rather than HBM. Expected duration improvement of ~1.1–1.3x (memory is the bottleneck at 94.1%, roofline gives up to ~1.1x but eliminating redundant traffic can exceed roofline since we cut actual bytes moved).
+
+3. **Changes Made**: Allocate a shared buffer of size `BLOCK_H × (BLOCK_S + CONV_K - 1)` holding pre-multiplied `Bx = B*x`. Each thread cooperatively loads its main element plus halo elements, then reads conv taps from SRAM. C and bias/weight reads stay in registers/global (C is read once, coalesced).
+
+KERNEL_CODE
+```python
+@cute.kernel
+def kernel(
+    b_ptr,
+    c_ptr,
+    x_ptr,
+    w_ptr,
+    bias_ptr,
+    y_ptr,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    bx, by, bz = cute.arch.block_idx()
+    tx, ty, _ = cute.arch.thread_idx()
+
+    batch_idx = bz
+    h = by * BLOCK_H + ty
+    s = bx * BLOCK_S + tx
+
+    smem_alloc = SmemAllocator()
+    # Bx tile: [BLOCK_H, BLOCK_S + CONV_K - 1], row-major
+    smem_bx = smem_alloc.allocate_tensor(
+        cutlass.Float32,
+        cute.make_layout((BLOCK_H, SMEM_S), stride=(SMEM_S, 1)),
+        16,
+    )
+
+    # Base seq index of this tile's shared buffer (left halo of CONV_K-1)
+    tile_s0 = bx * BLOCK_S - (CONV_K - 1)
+
+    # Cooperatively fill the shared buffer. There are SMEM_S columns to fill per row.
+    # Each thread (tx in 0..BLOCK_S-1) handles columns tx, tx+BLOCK_S, ...
+    h_valid = h < HIDDEN
+    col = tx
+    while col < SMEM_S:
+        gs = tile_s0 + col
+        val = 0.0
+        if h_valid:
+            if gs >= 0:
+                if gs < SEQ:
+                    val = b_ptr[batch_idx, h, gs] * x_ptr[batch_idx, h, gs]
+        smem_bx[ty, col] = val
+        col += BLOCK_S
+
+    cute.arch.sync_threads()
+
+    acc = 0.0
+    if h_valid:
+        if s < SEQ:
+            acc = bias_ptr[h]
+            # local index in shared buffer for position s is: s - tile_s0
+            # The element at lag k (pos = s-k) has column index (s - tile_s0 - k)
+            base_col = tx + (CONV_K - 1)  # = s - tile_s0
+            for k in cutlass.range(CONV_K):
+                local_col = base_col - k
+                acc += smem_bx[ty, local_col] * w_ptr[h, CONV_K - 1 - k]
+            y_ptr[batch_idx, h, s] = c_ptr[batch_idx, h, s] * acc
+```
+
+LAUNCHER_CODE
+```python
+@cute.jit
+def host(
+    b_t: torch.Tensor,
+    c_t: torch.Tensor,
+    x_t: torch.Tensor,
+    w_t: torch.Tensor,
+    bias_t: torch.Tensor,
+    y_t: torch.Tensor,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    grid = (math.ceil(SEQ / BLOCK_S), math.ceil(HIDDEN / BLOCK_H), BATCH)
+    kernel(
+        b_t, c_t, x_t, w_t, bias_t, y_t,
+        BATCH, HIDDEN, SEQ, CONV_K,
+    ).launch(grid=grid, block=(BLOCK_S, BLOCK_H, 1))
+```
+
+NEW_IMPORTS
+```python
+from cutlass.utils import SmemAllocator
+```
+
+NEW_CONSTANTS
+```python
+SMEM_S = 35
+```
+
+Note: `SMEM_S = BLOCK_S + CONV_K - 1 = 32 + 4 - 1 = 35` for the test config (CONV_K=4). This matches the shared-buffer width needed for the halo region.

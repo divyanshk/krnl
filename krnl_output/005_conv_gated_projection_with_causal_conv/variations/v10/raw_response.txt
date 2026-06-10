@@ -1,0 +1,122 @@
+## Analysis
+
+The bottleneck is memory latency (long_scoreboard 72.1%) and uncoalesced loads (sectors_per_request_ld=2.1). The key insight: this kernel reads B, x, C and writes y — but the conv is causal with K=4, so each Bx value is reused only K times within shared memory. The real cost is the global memory traffic of reading B, x, C.
+
+The dead ends (v6, v7, v8) all tried widening the seq-tile per thread, which **reduced occupancy / parallelism** and regressed. So I should NOT widen the tile.
+
+The current layout: thread `tx` maps to seq position, `ty` to hidden. With BLOCK_S=32, BLOCK_H=8 → 256 threads. The data is laid out (BATCH, HIDDEN, SEQ) row-major, so along SEQ is stride-1. A warp = 32 threads with tx in 0..31, ty fixed → 32 consecutive seq positions in the same row → **fully coalesced**. The sectors_per_request=2.1 likely comes from the halo loads and the misaligned `tile_s0 = bx*BLOCK_S - (CONV_K-1)`, which is not 128-byte aligned.
+
+**Key fix**: Load the main aligned tile (BLOCK_S columns, 128-byte aligned since bx*BLOCK_S*4 = bx*128) coalesced, and only the small halo (CONV_K-1=3 elements) separately. This keeps the bulk load perfectly aligned. Also, B and x are read together (multiply), so I keep the fused Bx. C is read once per output — already coalesced.
+
+The aligned-main + small-halo split avoids the misaligned base of the whole buffer.
+
+## 1. Principles Applied
+
+- **Memory Coalescing**: Split the smem fill into an aligned main region (offset `bx*BLOCK_S`, which is 128-byte aligned) loaded coalesced, plus a tiny halo of `CONV_K-1` elements loaded separately. This removes the misaligned base that inflates sectors_per_request to 2.1.
+- **Shared Memory Tiling / Minimize Global Memory Traffic**: keep fused Bx in shared (unchanged reuse benefit).
+
+## 2. Predicted Effect
+
+`sectors_per_request_ld` should drop from 2.1 toward ~1.0–1.3 because the bulk of loads are now 128-byte aligned and stride-1. This reduces wasted sectors → memory throughput effectively serves more useful bytes, `stall_long_scoreboard` should drop a few %. Expect ~2–5% faster than v1.
+
+## 3. Changes Made
+
+Replaced the single strided fill loop (which started at the misaligned `tile_s0`) with two phases: (1) the halo region of `CONV_K-1` elements filled by the first few threads, (2) the aligned main region `[bx*BLOCK_S .. bx*BLOCK_S+BLOCK_S)` filled coalesced with `tx` → consecutive seq positions. Indexing into smem accounts for halo offset.
+
+KERNEL_CODE
+```python
+@cute.kernel
+def kernel(
+    b_ptr,
+    c_ptr,
+    x_ptr,
+    w_ptr,
+    bias_ptr,
+    y_ptr,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    bx, by, bz = cute.arch.block_idx()
+    tx, ty, _ = cute.arch.thread_idx()
+
+    batch_idx = bz
+    h = by * BLOCK_H + ty
+    s = bx * BLOCK_S + tx
+
+    smem_alloc = SmemAllocator()
+    smem_bx = smem_alloc.allocate_tensor(
+        cutlass.Float32,
+        cute.make_layout((BLOCK_H, SMEM_S), stride=(SMEM_S, 1)),
+        16,
+    )
+
+    halo = CONV_K - 1
+    h_valid = h < HIDDEN
+    tile_base = bx * BLOCK_S  # 128-byte aligned (BLOCK_S * 4 = 128)
+
+    # ---- Phase 1: aligned main region (coalesced, stride-1 along SEQ) ----
+    # smem column (halo + tx) <- global seq (tile_base + tx)
+    gs_main = tile_base + tx
+    val_main = 0.0
+    if h_valid:
+        if gs_main < SEQ:
+            val_main = b_ptr[batch_idx, h, gs_main] * x_ptr[batch_idx, h, gs_main]
+    smem_bx[ty, halo + tx] = val_main
+
+    # ---- Phase 2: small halo region (CONV_K-1 elements at the left) ----
+    # smem column c (0..halo-1) <- global seq (tile_base - halo + c)
+    if tx < halo:
+        gs_halo = tile_base - halo + tx
+        val_halo = 0.0
+        if h_valid:
+            if gs_halo >= 0:
+                if gs_halo < SEQ:
+                    val_halo = b_ptr[batch_idx, h, gs_halo] * x_ptr[batch_idx, h, gs_halo]
+        smem_bx[ty, tx] = val_halo
+
+    cute.arch.sync_threads()
+
+    acc = 0.0
+    if h_valid:
+        if s < SEQ:
+            acc = bias_ptr[h]
+            base_col = tx + halo  # = s - tile_s0 where tile_s0 = tile_base - halo
+            for k in cutlass.range(CONV_K):
+                local_col = base_col - k
+                acc += smem_bx[ty, local_col] * w_ptr[h, CONV_K - 1 - k]
+            y_ptr[batch_idx, h, s] = c_ptr[batch_idx, h, s] * acc
+```
+
+LAUNCHER_CODE
+```python
+@cute.jit
+def host(
+    b_t: torch.Tensor,
+    c_t: torch.Tensor,
+    x_t: torch.Tensor,
+    w_t: torch.Tensor,
+    bias_t: torch.Tensor,
+    y_t: torch.Tensor,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    grid = (math.ceil(SEQ / BLOCK_S), math.ceil(HIDDEN / BLOCK_H), BATCH)
+    kernel(
+        b_t, c_t, x_t, w_t, bias_t, y_t,
+        BATCH, HIDDEN, SEQ, CONV_K,
+    ).launch(grid=grid, block=(BLOCK_S, BLOCK_H, 1))
+```
+
+NEW_IMPORTS
+```python
+from cutlass.utils import SmemAllocator
+```
+
+NEW_CONSTANTS
+```python
+NONE
+```

@@ -1,0 +1,19 @@
+{
+  "variation_id": 1,
+  "parent_id": 0,
+  "is_correct": true,
+  "duration_ns": 262368.0,
+  "speedup_vs_baseline": 1.021953896816685,
+  "speedup_vs_pytorch": 0.013172338090010977,
+  "compute_throughput_pct": 36.6,
+  "memory_throughput_pct": 94.2,
+  "occupancy": 0.8996999999999999,
+  "bottleneck": "NCU SOL VERDICT: This workload is utilizing greater than 80.0% of the available compute or memory performance of this device. To further improve performance, work will likely need to be shifted from the most utilized to another unit. Start by analyzing DRAM in the Memory Workload Analysis section.\nUNCOALESCED LOADS (sectors_per_request_ld=2.1, ideal=1.0) \u2014 threads in a warp are accessing non-contiguous addresses\nMEMORY LATENCY BOUND (long_scoreboard=72.1%) \u2014 kernel is blocked on HBM/L2 round-trips",
+  "principles_cited": [
+    "Shared Memory Tiling** \u2014 load each contiguous seq-tile of B and x (plus left halo of CONV_K-1) into ",
+    "Minimize Global Memory Traffic** \u2014 instead of reloading B[pos] and x[pos] for each of the CONV_K tap",
+    "2."
+  ],
+  "predicted_effect": "`sectors_per_request_ld` should drop from 3.4 toward ~1.0\u20131.5 since each global load is now a single coalesced streaming pass. `stall_long_scoreboard` (67.5%) should fall significantly as the conv-window reuse comes from SRAM rather than HBM. Expected duration improvement of ~1.1\u20131.3x (memory is the",
+  "error": null
+}

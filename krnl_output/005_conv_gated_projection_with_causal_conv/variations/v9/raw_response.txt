@@ -1,0 +1,122 @@
+## Analysis
+
+The key bottleneck is `sectors_per_request_ld=2.3` (uncoalesced loads) and 85% memory latency stall. The current v2 kernel separately loads `b_ptr[batch,h,gpos]` and `x_ptr[batch,h,gpos]` per thread. With `h` mapped to `blockIdx.y`, each block handles a single row, so loads along the SEQ dimension *should* be coalesced for the inner threads — but the **halo load** (the `tile_start - halo + i` indexing) misaligns the starting address. Because `tile_start - halo` is not a multiple of 32, the warp's first access straddles a 128-byte sector boundary, inflating `sectors_per_request` to ~2.3.
+
+The fix that previously failed (v5) crashed only due to a Python scoping error (`SMEM_LEN` referenced wrong), not because the idea was bad. The core idea — **align the main bulk load to `tile_start` (a multiple of BLOCK_S=128, hence 512-byte aligned) and load the small halo separately** — directly addresses coalescing.
+
+## 1. Principles Applied
+
+- **Memory Coalescing**: Split the cooperative load into an *aligned* main body (smem slots `halo..halo+BLOCK_S-1` ← global `tile_start..tile_start+BLOCK_S-1`, which is a 128-multiple → naturally aligned, stride-1) plus a tiny halo load handled by only the first `halo` threads. This makes the bulk warp loads start on aligned boundaries → `sectors_per_request_ld` drops toward 1.0.
+
+## 2. Predicted Effect
+
+- `sectors_per_request_ld`: 2.27 → ~1.1–1.3 (the bulk BLOCK_S=128-element load becomes aligned/coalesced; only the tiny halo of 3 elements is unaligned).
+- `stall_long_scoreboard`: drops modestly (fewer redundant sectors fetched → less HBM pressure).
+- `memory_throughput`: effective bandwidth improves; duration ~5–10% faster (roofline cap is ~1.1x).
+
+## 3. Changes Made
+
+Relative to v2: the single `while i < SMEM_LEN` loop (which uses misaligned `tile_start - halo + i`) is replaced by:
+1. An **aligned main loop**: thread `tx` loads global `tile_start + tx` into smem slot `halo + tx` (and strides by BLOCK_S). Since `tile_start` is a multiple of 128, warp accesses are aligned and coalesced.
+2. A **halo prologue**: only threads `tx < halo` load the `halo` left-boundary elements into smem slots `0..halo-1`.
+
+Compute body is unchanged. `SMEM_LEN` defined at module scope.
+
+## 4. Complete Kernel Code
+
+KERNEL_CODE
+```python
+@cute.kernel
+def kernel(
+    b_ptr, c_ptr, x_ptr, w_ptr, bias_ptr, y_ptr,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    bx, by, bz = cute.arch.block_idx()
+    tx, _, _ = cute.arch.thread_idx()
+
+    batch_idx = bz
+    h = by
+    tile_start = bx * BLOCK_S
+    halo = CONV_K - 1
+
+    smem_alloc = SmemAllocator()
+    # SMEM holds Bx for [tile_start - halo ... tile_start + BLOCK_S - 1]
+    # slot index s = (global pos) - (tile_start - halo)
+    smem_bx = smem_alloc.allocate_tensor(
+        cutlass.Float32,
+        cute.make_layout(SMEM_LEN, stride=1),
+        16,
+    )
+
+    # ---- Aligned main load ----
+    # smem slot (halo + i) <- Bx[tile_start + i]
+    # tile_start is a multiple of BLOCK_S (=128) -> aligned, fully coalesced.
+    i = tx
+    while i < BLOCK_S:
+        gpos = tile_start + i
+        val = 0.0
+        if h < HIDDEN and gpos >= 0 and gpos < SEQ:
+            val = b_ptr[batch_idx, h, gpos] * x_ptr[batch_idx, h, gpos]
+        smem_bx[halo + i] = val
+        i = i + BLOCK_S
+
+    # ---- Halo load (small, handled by first `halo` threads) ----
+    # smem slot j (0..halo-1) <- Bx[tile_start - halo + j]
+    if tx < halo:
+        gpos = tile_start - halo + tx
+        hval = 0.0
+        if h < HIDDEN and gpos >= 0 and gpos < SEQ:
+            hval = b_ptr[batch_idx, h, gpos] * x_ptr[batch_idx, h, gpos]
+        smem_bx[tx] = hval
+
+    cute.arch.sync_threads()
+
+    s = tile_start + tx
+    acc = 0.0
+    if h < HIDDEN and s < SEQ:
+        acc = bias_ptr[h]
+        # output pos s maps to smem slot (halo + tx); tap k uses pos = s - k
+        # -> smem slot = halo + tx - k.
+        for k in cutlass.range(CONV_K):
+            pos = s - k
+            if pos >= 0:
+                slot = tx + halo - k
+                acc += smem_bx[slot] * w_ptr[h, CONV_K - 1 - k]
+        y_ptr[batch_idx, h, s] = c_ptr[batch_idx, h, s] * acc
+```
+
+## 5. Complete Launcher Code
+
+LAUNCHER_CODE
+```python
+@cute.jit
+def host(
+    b_t, c_t, x_t, w_t, bias_t, y_t,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    grid = (math.ceil(SEQ / BLOCK_S), HIDDEN, BATCH)
+    kernel(
+        b_t, c_t, x_t, w_t, bias_t, y_t,
+        BATCH, HIDDEN, SEQ, CONV_K,
+    ).launch(grid=grid, block=(BLOCK_S, 1, 1))
+```
+
+## 6. New Imports
+
+NEW_IMPORTS
+```python
+from cutlass.utils import SmemAllocator
+```
+
+## 7. New Constants
+
+NEW_CONSTANTS
+```python
+NONE
+```

@@ -1,0 +1,105 @@
+## Analysis
+
+The kernel layout is `(BATCH, HIDDEN, SEQ)` — innermost dim is SEQ. With `BLOCK_S=32` along threadIdx.x and `BLOCK_H=8` along threadIdx.y, a warp (32 threads) spans `threadIdx.x` (the SEQ dim). Since consecutive `s` values are contiguous in memory (stride-1 along SEQ), the loads *should* be coalesced along SEQ.
+
+But the conv reads `b_ptr[batch, h, pos]` where `pos = s - k`. For the same warp, threads access `s, s-k` etc. — still stride-1 along s. The uncoalescing (sectors_per_request=3.35) comes from the fact that each thread reads `CONV_K` overlapping windows, and with `BLOCK_H=8` rows of different `h` issue separate transactions, plus boundary predication breaks alignment.
+
+The key insight: **adjacent threads in seq overlap their conv windows almost entirely**. With CONV_K=4, thread `s` reads B[s],B[s-1],B[s-2],B[s-3]. We should load `Bx = B*x` once into shared memory per (h, seq-tile) including a halo of CONV_K-1, then each thread reads from SMEM. This eliminates the redundant overlapping HBM reads (each B[h,s] is read CONV_K times currently).
+
+## Principles Applied
+
+- **Shared Memory Tiling**: Long-scoreboard stalls 67.5%, L2 hit rate only 33.9%. Each `B[h,s]` and `x[h,s]` is currently re-fetched from HBM up to CONV_K times across overlapping conv windows. Tiling the seq dimension into shared memory with a halo eliminates these redundant HBM round-trips.
+- **Minimize Global Memory Traffic**: Compute `Bx = B*x` once per element in SMEM, reused across CONV_K taps.
+
+## Predicted Effect
+
+- `stall_long_scoreboard_pct` drops from 67.5% as conv-tap reads now hit SMEM.
+- `sectors_per_request_ld` improves toward ~1.0–1.5 since SMEM loads with halo are coalesced for the single-pass HBM load.
+- HBM read traffic for B and x drops ~CONV_K× → ~4×. Expect duration to drop ~20-35% (memory-bound at 94%).
+
+## Changes Made
+
+Each block handles one `h` row (BLOCK_H=1) and a seq tile of BLOCK_S=128. We cooperatively load `Bx = B*x` for `[tile_start - (CONV_K-1), tile_start + BLOCK_S)` into SMEM, sync, then each thread computes its conv from SMEM and reads C once.
+
+KERNEL_CODE
+```python
+@cute.kernel
+def kernel(
+    b_ptr, c_ptr, x_ptr, w_ptr, bias_ptr, y_ptr,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    bx, by, bz = cute.arch.block_idx()
+    tx, _, _ = cute.arch.thread_idx()
+
+    batch_idx = bz
+    h = by
+    tile_start = bx * BLOCK_S
+
+    smem_alloc = SmemAllocator()
+    # SMEM holds Bx for [tile_start - (CONV_K-1) ... tile_start + BLOCK_S - 1]
+    smem_bx = smem_alloc.allocate_tensor(
+        cutlass.Float32,
+        cute.make_layout(SMEM_LEN, stride=1),
+        16,
+    )
+
+    # Load weights for this h into registers (broadcast across threads is fine)
+    # Cooperative load of Bx into shared memory with halo.
+    # global index for smem slot i: tile_start - (CONV_K - 1) + i
+    halo = CONV_K - 1
+    i = tx
+    while i < SMEM_LEN:
+        gpos = tile_start - halo + i
+        val = 0.0
+        if h < HIDDEN and gpos >= 0 and gpos < SEQ:
+            val = b_ptr[batch_idx, h, gpos] * x_ptr[batch_idx, h, gpos]
+        smem_bx[i] = val
+        i = i + BLOCK_S
+
+    cute.arch.sync_threads()
+
+    s = tile_start + tx
+    acc = 0.0
+    if h < HIDDEN and s < SEQ:
+        acc = bias_ptr[h]
+        # smem slot for global pos p is: p - (tile_start - halo) = (p - tile_start) + halo
+        # for pos = s - k = tile_start + tx - k -> slot = tx + halo - k
+        for k in cutlass.range(CONV_K):
+            pos = s - k
+            if pos >= 0:
+                slot = tx + halo - k
+                acc += smem_bx[slot] * w_ptr[h, CONV_K - 1 - k]
+        y_ptr[batch_idx, h, s] = c_ptr[batch_idx, h, s] * acc
+```
+
+LAUNCHER_CODE
+```python
+@cute.jit
+def host(
+    b_t, c_t, x_t, w_t, bias_t, y_t,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    grid = (math.ceil(SEQ / BLOCK_S), HIDDEN, BATCH)
+    kernel(
+        b_t, c_t, x_t, w_t, bias_t, y_t,
+        BATCH, HIDDEN, SEQ, CONV_K,
+    ).launch(grid=grid, block=(BLOCK_S, 1, 1))
+```
+
+NEW_IMPORTS
+```python
+from cutlass.utils import SmemAllocator
+```
+
+NEW_CONSTANTS
+```python
+BLOCK_H = 1
+BLOCK_S = 128
+SMEM_LEN = 131
+```

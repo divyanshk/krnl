@@ -1,0 +1,125 @@
+## Analysis
+
+The kernel is memory-latency bound (long_scoreboard 72%), with uncoalesced loads (sectors_per_request_ld=2.1). The key insight: the conv tile only needs `B*x` (loaded into smem), but the kernel **also** reads `c_ptr[batch_idx, h, s]` and `bias_ptr[h]` directly from global memory in the compute phase — and crucially, the `c_ptr` read happens with the same threads accessing the seq dimension (`s = bx*BLOCK_S + tx`), which along the contiguous SEQ axis IS coalesced, but the layout is `(BATCH,HIDDEN,SEQ)` so stride for seq is 1 — good. The uncoalescing comes from the smem load loop where threads load `b/x` at `gpos = tile_s0 + col` per-row.
+
+The biggest opportunity (compute 69% unused, memory near peak): we're doing 2 global reads (b, x) for the same data that overlaps across blocks. But within a block, each element is loaded once. The real win is reducing **memory transactions** by increasing the seq-tile per block so the halo overhead amortizes, AND vectorizing loads of b and x.
+
+Since memory is at 94.5% (only 5.5% headroom) but compute is 30% — the roofline says max ~1.1x. The cleanest lever: **wider BLOCK_S** to amortize halo (HALO=3 over BLOCK_S=32 means ~9% wasted halo loads) and ensure each thread's loads are stride-1 coalesced. Increasing BLOCK_S to 128 cuts halo overhead from ~9% to ~2.3% and reduces redundant cross-block halo HBM reads.
+
+## 1. Principles Applied
+
+- **Minimize Global Memory Traffic**: The HALO=CONV_K-1 region is re-loaded by adjacent blocks. With BLOCK_S=32 and HALO=3, ~9% of B/x loads are redundant halo. Widening BLOCK_S to 128 reduces redundant halo fetches to ~2.3%, cutting total HBM traffic.
+- **Memory Coalescing**: With a wider tile and a contiguous load loop where consecutive threads (tx) map to consecutive seq positions (stride-1), the smem-fill loop loads are fully coalesced along SEQ.
+
+## 2. Predicted Effect
+
+Total B/x HBM reads drop by ~6% (halo amortization), which directly reduces memory throughput pressure. Since we're memory-bound at 94.5%, reducing traffic should lower `duration_ns` by ~3–6%. `sectors_per_request_ld` should move toward ~1.5 as the wider contiguous loads coalesce better. Roofline caps at ~1.1x.
+
+## 3. Changes Made
+
+Relative to v4: increased `BLOCK_S` from 32 to 128 (4x wider seq tile), reduced `BLOCK_H` to 8 (keep block ~1024 threads → 128×8=1024). Kept the same cooperative smem-fill loop and compute logic. Wider tile amortizes the fixed HALO halo overhead and improves coalescing of the contiguous SEQ loads.
+
+## 4. Complete Kernel Code
+
+KERNEL_CODE
+```python
+@cute.kernel
+def kernel(
+    b_ptr,
+    c_ptr,
+    x_ptr,
+    w_ptr,
+    bias_ptr,
+    y_ptr,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    bx, by, bz = cute.arch.block_idx()
+    tx, ty, _ = cute.arch.thread_idx()
+
+    batch_idx = bz
+    h = by * BLOCK_H + ty
+    s = bx * BLOCK_S + tx
+
+    HALO = CONV_K - 1
+    SMEM_S = BLOCK_S + HALO
+
+    smem_alloc = SmemAllocator()
+    smem_bx = smem_alloc.allocate_tensor(
+        cutlass.Float32,
+        cute.make_layout((BLOCK_H, SMEM_S), stride=(SMEM_S, 1)),
+        16,
+    )
+
+    # base seq index of the shared tile (left halo region starts before tile)
+    tile_s0 = bx * BLOCK_S - HALO
+
+    # Cooperatively load Bx = B * x into shared memory (including left halo).
+    # Wider BLOCK_S amortizes the fixed HALO overhead; consecutive tx -> consecutive
+    # seq positions => fully coalesced stride-1 loads along SEQ.
+    if h < HIDDEN:
+        col = tx
+        while col < SMEM_S:
+            gpos = tile_s0 + col
+            val = 0.0
+            if gpos >= 0 and gpos < SEQ:
+                val = b_ptr[batch_idx, h, gpos] * x_ptr[batch_idx, h, gpos]
+            smem_bx[ty, col] = val
+            col += BLOCK_S
+
+    cute.arch.sync_threads()
+
+    acc = 0.0
+    if h < HIDDEN and s < SEQ:
+        acc = bias_ptr[h]
+        # output position s maps to smem column index HALO + tx;
+        # tap k uses pos = s - k -> smem col = HALO + tx - k.
+        base_col = HALO + tx
+        for k in cutlass.range(CONV_K):
+            scol = base_col - k
+            gpos = s - k
+            if gpos >= 0:
+                acc += smem_bx[ty, scol] * w_ptr[h, CONV_K - 1 - k]
+        y_ptr[batch_idx, h, s] = c_ptr[batch_idx, h, s] * acc
+```
+
+## 5. Complete Launcher Code
+
+LAUNCHER_CODE
+```python
+@cute.jit
+def host(
+    b_t: torch.Tensor,
+    c_t: torch.Tensor,
+    x_t: torch.Tensor,
+    w_t: torch.Tensor,
+    bias_t: torch.Tensor,
+    y_t: torch.Tensor,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    grid = (math.ceil(SEQ / BLOCK_S), math.ceil(HIDDEN / BLOCK_H), BATCH)
+    kernel(
+        b_t, c_t, x_t, w_t, bias_t, y_t,
+        BATCH, HIDDEN, SEQ, CONV_K,
+    ).launch(grid=grid, block=(BLOCK_S, BLOCK_H, 1))
+```
+
+## 6. New Imports
+
+NEW_IMPORTS
+```python
+from cutlass.utils import SmemAllocator
+```
+
+## 7. New Constants
+
+NEW_CONSTANTS
+```python
+BLOCK_S = 128
+BLOCK_H = 8
+```

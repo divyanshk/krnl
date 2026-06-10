@@ -1,0 +1,147 @@
+## Analysis
+
+The kernel is memory-latency bound with uncoalesced loads (sectors/request=2.1). The root cause: each thread reads `b_ptr` and `x_ptr` separately (two distinct HBM streams), and the conv weight `w_ptr[h, ...]` is reloaded inside the inner k-loop for every output. The memory throughput is already at 94%, so the only way to gain is reducing redundant traffic and improving coalescing.
+
+Key observations from the dead ends:
+- Widening the seq tile per thread (v6/v7/v8) consistently regressed — it hurt occupancy and coalescing.
+- v2 (best) used a 1D thread layout (`tx` only).
+
+The remaining opportunity: the `w_ptr[h, CONV_K-1-k]` reads inside the loop hit HBM/L2 repeatedly. With CONV_K=4 and BLOCK_S=32 threads per row, all threads in a row use the **same** `w_ptr[h, :]` values. Hoisting the conv weights into registers **once per thread** (outside the k-loop, indexed by constant) lets the compiler keep them in registers and removes 4 redundant strided gmem loads per output. Same for bias. This reduces global traffic on the weight tensor and improves ILP.
+
+## 1. Principles Applied
+
+- **Minimize Global Memory Traffic**: Hoist `w_ptr[h,k]` and `bias_ptr[h]` loads out of the inner conv loop into registers read once per thread. With CONV_K=4 this eliminates redundant strided weight reads that inflate `sectors_per_request_ld`.
+- **Memory Coalescing**: The conv-weight reads `w_ptr[h, CONV_K-1-k]` are stride-1 along k but performed inside a loop; reading them as a contiguous block once per thread is better coalesced.
+
+## 2. Predicted Effect
+
+- `sectors_per_request_ld` should drop from 2.1 toward ~1.5–1.8 (fewer scattered weight reads).
+- `stall_long_scoreboard` should fall a few points as the weight/bias loads are issued early and overlapped.
+- Modest duration improvement (~1–3%) since we're already at 94% memory util; main gain is fewer total HBM transactions on `w`/`bias`.
+
+## 3. Changes Made (relative to v3)
+
+- Pre-load `bias_ptr[h]` and all `CONV_K` weights `w_ptr[h, :]` into local register variables **before** the conv loop (issued right after smem sync, overlapping latency).
+- Use the cached weight registers inside the k-loop instead of re-reading global memory each iteration.
+- Kept the same 2D block layout, smem tiling, and indexing as v3 (which is correct).
+
+## 4. Complete Kernel Code
+
+KERNEL_CODE
+```python
+@cute.kernel
+def kernel(
+    b_ptr,
+    c_ptr,
+    x_ptr,
+    w_ptr,
+    bias_ptr,
+    y_ptr,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    bx, by, bz = cute.arch.block_idx()
+    tx, ty, _ = cute.arch.thread_idx()
+
+    batch_idx = bz
+    h = by * BLOCK_H + ty
+    s_base = bx * BLOCK_S
+
+    smem_alloc = SmemAllocator()
+    smem_bx = smem_alloc.allocate_tensor(
+        cutlass.Float32,
+        cute.make_layout((BLOCK_H, SMEM_COLS), stride=(SMEM_COLS, 1)),
+        16,
+    )
+
+    halo = CONV_K - 1
+
+    # Cooperative coalesced load of Bx into shared memory (with left halo).
+    j = tx
+    while j < SMEM_COLS:
+        seq_idx = s_base - halo + j
+        val = 0.0
+        if h < HIDDEN and seq_idx >= 0 and seq_idx < SEQ:
+            val = b_ptr[batch_idx, h, seq_idx] * x_ptr[batch_idx, h, seq_idx]
+        smem_bx[ty, j] = val
+        j = j + BLOCK_S
+
+    # ---- Hoist conv weights + bias into registers once per thread ----
+    # All threads in a row share these; reading once avoids redundant strided
+    # global loads inside the inner conv loop (Minimize Global Memory Traffic).
+    h_valid = h < HIDDEN
+    bias_val = 0.0
+    w0 = 0.0
+    w1 = 0.0
+    w2 = 0.0
+    w3 = 0.0
+    if h_valid:
+        bias_val = bias_ptr[h]
+        # w_ptr[h, CONV_K-1-k] for k=0..CONV_K-1 -> reversed weights
+        # store w_rev[k] = w_ptr[h, CONV_K-1-k]
+        w0 = w_ptr[h, CONV_K - 1]            # k=0
+        if CONV_K > 1:
+            w1 = w_ptr[h, CONV_K - 2]        # k=1
+        if CONV_K > 2:
+            w2 = w_ptr[h, CONV_K - 3]        # k=2
+        if CONV_K > 3:
+            w3 = w_ptr[h, CONV_K - 4]        # k=3
+
+    cute.arch.sync_threads()
+
+    s = s_base + tx
+    acc = 0.0
+    if h_valid and s < SEQ:
+        acc = bias_val
+        base_col = tx + halo
+        # tap k uses pos = s - k -> smem col = base_col - k, weight = w_rev[k]
+        if (s - 0) >= 0:
+            acc += smem_bx[ty, base_col - 0] * w0
+        if CONV_K > 1 and (s - 1) >= 0:
+            acc += smem_bx[ty, base_col - 1] * w1
+        if CONV_K > 2 and (s - 2) >= 0:
+            acc += smem_bx[ty, base_col - 2] * w2
+        if CONV_K > 3 and (s - 3) >= 0:
+            acc += smem_bx[ty, base_col - 3] * w3
+        y_ptr[batch_idx, h, s] = c_ptr[batch_idx, h, s] * acc
+```
+
+## 5. Complete Launcher Code
+
+LAUNCHER_CODE
+```python
+@cute.jit
+def host(
+    b_t: torch.Tensor,
+    c_t: torch.Tensor,
+    x_t: torch.Tensor,
+    w_t: torch.Tensor,
+    bias_t: torch.Tensor,
+    y_t: torch.Tensor,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    grid = (math.ceil(SEQ / BLOCK_S), math.ceil(HIDDEN / BLOCK_H), BATCH)
+    kernel(
+        b_t, c_t, x_t, w_t, bias_t, y_t,
+        BATCH, HIDDEN, SEQ, CONV_K,
+    ).launch(grid=grid, block=(BLOCK_S, BLOCK_H, 1))
+```
+
+## 6. New Imports
+
+NEW_IMPORTS
+```python
+from cutlass.utils import SmemAllocator
+```
+
+## 7. New Constants
+
+NEW_CONSTANTS
+```python
+NONE
+```

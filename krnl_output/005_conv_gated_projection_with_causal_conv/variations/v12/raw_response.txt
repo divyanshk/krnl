@@ -1,0 +1,121 @@
+## Analysis
+
+The kernel is memory latency bound (long_scoreboard=72.1%) with uncoalesced loads (sectors_per_request_ld=2.1). The key insight: the conv reads `B` and `x` separately (two HBM streams) then multiplies. With `BLOCK_H=8, BLOCK_S=32`, a warp (32 threads in tx) covers one h-row of 32 consecutive seq positions — these ARE coalesced for B/x. But the output write to `y_ptr` and the read of `c_ptr` along the same seq dimension are also stride-1.
+
+The store sectors/request is 4.0 (bad), and the conv inner loop reads `w_ptr[h, ...]` redundantly per thread. The biggest opportunity per the headroom: COMPUTE is only 30.8% used but we're memory bound. The real lever for a memory-latency-bound kernel is **more in-flight memory** — i.e., raise ILP per thread by loading B and x with vectorized 128-bit loads and hoisting `c_ptr` / `w_ptr` reads.
+
+Strategy NOT yet tried: hoist the conv weights into registers once per thread (avoid `w_ptr` re-read in the loop), and prefetch `c_ptr[batch,h,s]` early (before the conv loop) so its long-latency load overlaps with the conv compute, hiding latency without changing tiling. This addresses MEMORY LATENCY BOUND by overlapping the C load with conv arithmetic.
+
+## 1. Principles Applied
+- **Minimize Global Memory Traffic / Latency Hiding**: hoist `c_ptr[batch,h,s]` load *before* the conv inner loop so its HBM round-trip overlaps with the conv MACs (instruction-level parallelism), and load the `CONV_K` weights once into registers instead of re-reading `w_ptr` each tap. This shifts work to overlap latency.
+
+## 2. Predicted Effect
+- `stall_long_scoreboard` should drop from 72.1% (C load latency now hidden behind conv compute) → expect 60–65%.
+- Compute throughput rises slightly as redundant `w_ptr` reads are eliminated.
+- Duration: expect ~2–4% improvement (memory roofline only allows ~1.1x).
+
+## 3. Changes Made
+Relative to v4: load conv weights into registers `w0..w3` once, prefetch `c_val = c_ptr[batch,h,s]` immediately after syncthreads (before the conv loop) so the load is issued early, then use it in the final multiply. Keeps identical tiling/grid.
+
+KERNEL_CODE
+```python
+@cute.kernel
+def kernel(
+    b_ptr,
+    c_ptr,
+    x_ptr,
+    w_ptr,
+    bias_ptr,
+    y_ptr,
+    BATCH: cutlass.Constexpr[int],
+    HIDDEN: cutlass.Constexpr[int],
+    SEQ: cutlass.Constexpr[int],
+    CONV_K: cutlass.Constexpr[int],
+):
+    bx, by, bz = cute.arch.block_idx()
+    tx, ty, _ = cute.arch.thread_idx()
+
+    batch_idx = bz
+    h = by * BLOCK_H + ty
+    s = bx * BLOCK_S + tx
+
+    HALO = CONV_K - 1
+    SMEM_S = BLOCK_S + HALO
+
+    smem_alloc = SmemAllocator()
+    smem_bx = smem_alloc.allocate_tensor(
+        cutlass.Float32,
+        cute.make_layout((BLOCK_H, SMEM_S), stride=(SMEM_S, 1)),
+        16,
+    )
+
+    tile_s0 = bx * BLOCK_S - HALO
+
+    # Hoist conv weights (and bias) into registers once per thread, before the
+    # cooperative load, so they're resident and never re-read in the inner loop.
+    bias_val = 0.0
+    w0 = 0.0
+    w1 = 0.0
+    w2 = 0.0
+    w3 = 0.0
+    if h < HIDDEN:
+        bias_val = bias_ptr[h]
+        # weights in reversed tap order (cross-correlation w/ left-pad):
+        # tap k uses w_ptr[h, CONV_K - 1 - k]
+        w0 = w_ptr[h, CONV_K - 1 - 0]
+        if CONV_K > 1:
+            w1 = w_ptr[h, CONV_K - 1 - 1]
+        if CONV_K > 2:
+            w2 = w_ptr[h, CONV_K - 1 - 2]
+        if CONV_K > 3:
+            w3 = w_ptr[h, CONV_K - 1 - 3]
+
+    # Cooperatively load Bx = B * x into shared memory (including left halo).
+    if h < HIDDEN:
+        col = tx
+        while col < SMEM_S:
+            gpos = tile_s0 + col
+            val = 0.0
+            if gpos >= 0 and gpos < SEQ:
+                val = b_ptr[batch_idx, h, gpos] * x_ptr[batch_idx, h, gpos]
+            smem_bx[ty, col] = val
+            col += BLOCK_S
+
+    cute.arch.sync_threads()
+
+    # Prefetch the C gate value early so its HBM round-trip overlaps with the
+    # conv compute below (latency hiding via ILP).
+    c_val = 0.0
+    if h < HIDDEN and s < SEQ:
+        c_val = c_ptr[batch_idx, h, s]
+
+    acc = 0.0
+    if h < HIDDEN and s < SEQ:
+        acc = bias_val
+        base_col = HALO + tx
+        # Unrolled, register-resident weights. Each tap reads only from smem.
+        if CONV_K > 0 and s - 0 >= 0:
+            acc += smem_bx[ty, base_col - 0] * w0
+        if CONV_K > 1 and s - 1 >= 0:
+            acc += smem_bx[ty, base_col - 1] * w1
+        if CONV_K > 2 and s - 2 >= 0:
+            acc += smem_bx[ty, base_col - 2] * w2
+        if CONV_K > 3 and s - 3 >= 0:
+            acc += smem_bx[ty, base_col - 3] * w3
+        y_ptr[batch_idx, h, s] = c_val * acc
+```
+
+LAUNCHER_CODE
+```python
+NO CHANGE
+```
+
+NEW_IMPORTS
+```python
+NONE
+```
+
+NEW_CONSTANTS
+```python
+NONE
+```

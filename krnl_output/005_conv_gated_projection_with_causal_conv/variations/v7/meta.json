@@ -1,0 +1,15 @@
+{
+  "variation_id": 7,
+  "parent_id": 3,
+  "is_correct": true,
+  "duration_ns": 284448.0,
+  "speedup_vs_baseline": 0.9426257171785353,
+  "speedup_vs_pytorch": 0.012149848126898413,
+  "compute_throughput_pct": 20.41,
+  "memory_throughput_pct": 94.13,
+  "occupancy": 0.9307,
+  "bottleneck": "NCU SOL VERDICT: This workload is utilizing greater than 80.0% of the available compute or memory performance of this device. To further improve performance, work will likely need to be shifted from the most utilized to another unit. Start by analyzing DRAM in the Memory Workload Analysis section.\nUNCOALESCED LOADS (sectors_per_request_ld=3.3, ideal=1.0) \u2014 threads in a warp are accessing non-contiguous addresses\nMEMORY LATENCY BOUND (long_scoreboard=87.8%) \u2014 kernel is blocked on HBM/L2 round-trips",
+  "principles_cited": [],
+  "predicted_effect": "",
+  "error": null
+}

@@ -294,7 +294,24 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
 
             console.print("    [green]Correctness OK[/]")
 
-            # Profile with NCU, saving raw CSV + summary to var_dir
+            # Profile with NCU, saving raw CSV + summary to var_dir.
+            # Re-parse the variation file to pick up the *actual* @cute.kernel name —
+            # if the LLM renamed it despite the prompt's instructions, the parent's
+            # name won't match the CUTLASS-mangled symbol and NCU returns no kernels.
+            try:
+                var_info = parse_kernel_file(var_path)
+                effective_kernel_fn_names = (
+                    var_info.kernel_fn_names or kernel_info.kernel_fn_names
+                )
+                if var_info.kernel_fn_names != kernel_info.kernel_fn_names:
+                    console.print(
+                        f"    [yellow]Warning: variation renamed kernel "
+                        f"{kernel_info.kernel_fn_names} → {var_info.kernel_fn_names}; "
+                        f"using new name for NCU filter[/]"
+                    )
+            except Exception:
+                effective_kernel_fn_names = kernel_info.kernel_fn_names
+
             var_ncu: list[NCUMetrics] = []
             console.print("    Profiling with NCU...")
             try:
@@ -304,7 +321,7 @@ def run_optimization(config: KrnlConfig, console: Console) -> None:
                     kernel_info.test_inputs_fn_name,
                     config.ncu_metrics,
                     log_dir=var_dir,
-                    kernel_fn_names=kernel_info.kernel_fn_names,
+                    kernel_fn_names=effective_kernel_fn_names,
                 )
             except Exception as e:
                 console.print(f"    [yellow]NCU profiling failed: {e}[/]")

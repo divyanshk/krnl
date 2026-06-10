@@ -95,6 +95,13 @@ def generate_variations(
             else "No bottleneck data."
         )
 
+        # Surface the original function names so the LLM doesn't rename them
+        # (renames silently break NCU's --kernel-name filter and may break the launch wrapper).
+        kernel_fn_name = (
+            kernel_info.kernel_fn_names[0] if kernel_info.kernel_fn_names else "kernel"
+        )
+        jit_launcher_fn_name = kernel_info.jit_launcher_fn_name or "host"
+
         prompt = VARIATION_USER_PROMPT.format(
             parent_id=parent.variation_id,
             parent_bottleneck=parent.bottleneck,
@@ -107,6 +114,8 @@ def generate_variations(
             principles_text=principles_text,
             dead_ends=dead_ends,
             history=history,
+            kernel_fn_name=kernel_fn_name,
+            jit_launcher_fn_name=jit_launcher_fn_name,
         )
 
         # When multiple variations are generated, steer each toward a distinct strategy

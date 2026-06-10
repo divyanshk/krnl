@@ -18,10 +18,13 @@ Rules:
 3. You MUST predict the expected performance effect of your changes.
 4. Only modify the @cute.kernel function(s) and the @cute.jit host launcher. Do NOT modify \
 the public Python launcher (launch / *_launch), the reference implementation, test inputs.
-5. Preserve the function signatures of the @cute.jit launcher and test inputs generator.
-6. Be specific about what you changed and why.
-7. Study the dead ends carefully — do not re-apply strategies that have already failed or regressed.
-8. Use the remaining headroom analysis to target the right bottleneck.
+5. **Preserve the EXACT function names** of the @cute.kernel and @cute.jit functions from the \
+parent file. The public launcher calls them by name and the NCU profiler filters on the original \
+kernel symbol — renaming them silently breaks profiling and may break the launch wrapper too.
+6. Preserve the parameter signatures of the @cute.jit launcher and test inputs generator.
+7. Be specific about what you changed and why.
+8. Study the dead ends carefully — do not re-apply strategies that have already failed or regressed.
+9. Use the remaining headroom analysis to target the right bottleneck.
 """
 
 VARIATION_USER_PROMPT = """\
@@ -117,14 +120,14 @@ by the parser):
 KERNEL_CODE
 ```python
 @cute.kernel
-def optimized_kernel(...):
+def {kernel_fn_name}(...):   # IMPORTANT: keep the exact same function name as the parent
     ...
 ```
 
 LAUNCHER_CODE
 ```python
 @cute.jit
-def kernel_launch(...):
+def {jit_launcher_fn_name}(...):   # IMPORTANT: keep the exact same function name as the parent
     ...
 ```
 
